@@ -1744,8 +1744,8 @@ dependencies = [
 
 [[package]]
 name = "zpr"
-version = "0.24.0"
-source = "git+https://github.com/mkolehmainen/zl-zpr-common.git?tag=v0.24.0#d135fe533a47c77a0ecbc64edfe666c0d26e5bbc"
+version = "0.25.1"
+source = "git+https://github.com/mkolehmainen/zl-zpr-common.git?tag=v0.25.1#104c8112cdf0eb780e2be7c0ad30cbe31e155fa5"
 dependencies = [
  "base64",
  "bytes",
