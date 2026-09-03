@@ -138,6 +138,9 @@ For non default trusted services, the field meanings are:
   * `file` - A file-backed attribute source offered by the visa service itself, with no
      network presence. The visa service loads the attributes from a local `<TSNAME>.json`
      file at runtime. See *File Trusted Services* below.
+  * `oidc` - An OpenID Connect identity provider (e.g. Google). The adapter talks to the
+     provider directly; the visa service only needs the provider's JWKS to verify tokens.
+     See *OIDC Trusted Services* below.
   * *addition values TBD*
 * `service` - Sets the service ID used in the **services** block for the visa-service
   facing service provided by this trusted service.  This is *optional* and by default
@@ -152,7 +155,8 @@ For non default trusted services, the field meanings are:
 * `identity_attributes` - Subset of the `returns_attributes` that denote identity.
 * `provider` - Attribute key/value tuples of the actor (or actors) that provide this service.
 * `expiration_seconds` - Optional lifetime (in seconds) of the attributes this service vouches
-  for. Accepted on `validation/2` and `file` services; rejected on `default`. Must be a
+  for. Accepted on `validation/2`, `file`, and `oidc` services (required and positive for
+  `oidc`); rejected on `default`. Must be a
   non-negative integer that fits in a 32-bit unsigned value. Omitted or `0` means the visa
   service selects the lifetime at runtime (from the service or its own default).
 
@@ -207,6 +211,60 @@ and `identity_attributes` properties are **not** allowed. The compiler weaves it
 offered by the visa service CN (`vs.zpr`) with no endpoints and no communication policy. The
 attribute mappings use the same `->` syntax (and single / `{}` multi / `#` tag forms) as any other
 trusted service (see *Attributes* below).
+
+### OIDC Trusted Services
+
+An `oidc` trusted service declares an OpenID Connect identity provider (such as Google)
+as an attribute source. The adapter performs the OIDC flow with the provider directly;
+the visa service only verifies the resulting ID tokens against the provider's JWKS.
+
+```toml
+[trusted_services.google]
+api = "oidc"
+issuer = "https://accounts.google.com"
+jwks_uri = "https://www.googleapis.com/oauth2/v3/certs"
+client_id = "my-client-id.apps.googleusercontent.com"
+allowed_domains = ["example.com"]
+expiration_seconds = 3600
+service = "google-jwks"
+returns_attributes = ["sub -> user.sub", "email -> user.email"]
+identity_attributes = ["sub"]
+```
+
+Properties:
+
+* `issuer` - **Required.** The provider's issuer URL as it appears in its tokens. Must be
+  an `https://` URL with no query string or fragment.
+* `jwks_uri` - **Required.** The provider's JWKS endpoint, from which the visa service
+  fetches the token-signing keys. Must be `https://`.
+* `client_id` - **Required.** The OAuth client ID registered with the provider; must be
+  non-empty.
+* `client_secret` - Optional OAuth client secret, for providers that require one.
+* `scopes` - Optional list of OAuth scopes to request. Defaults to
+  `["openid", "email", "profile"]`. If set, it must include `"openid"`.
+* `allowed_domains` - **Required**, non-empty. Account domains accepted from this
+  provider. Use `["*"]` to accept any account.
+* `seed_jwks` - Optional path to a local JWKS file used to seed key material at compile
+  time (resolved relative to the `.zplc` file).
+* `expiration_seconds` - **Required** for `oidc`, and must be positive: the lifetime of
+  the attributes this provider vouches for.
+* `max_auth_age_seconds` - Optional maximum age (in seconds) of the user's
+  authentication before re-authentication is required. Defaults to `0` (no limit).
+* `allow_offline_access` - Optional boolean, default `false`. Whether to request
+  offline access (refresh tokens) from the provider.
+* `returns_attributes` - **Required**, at least one mapping, using the same `->` syntax
+  as any other trusted service. The `zpr.` sub-namespace remains reserved.
+* `identity_attributes` - **Required** and must be exactly `["sub"]` — the OIDC subject
+  is the only stable identity. In particular, `"email"` is rejected as an identity
+  attribute because addresses are mutable and reusable.
+* `service` - Optional, as for other trusted services. If omitted, the compiler warns:
+  without a declared service the visa service will need direct internet egress to reach
+  the `jwks_uri`.
+
+Because the adapter talks to the provider directly and TLS to the provider is verified
+against system roots, the `client`, `provider`, `cert_path`, and `prefix` properties are
+**not** allowed on an `oidc` trusted service. The `default` trusted service cannot use
+`api = "oidc"`.
 
 ### Attributes
 
