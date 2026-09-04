@@ -295,6 +295,49 @@ pub fn dump_v2(fname: &str, encoded_buf: Bytes) {
                     if !ts.identity_attrs.is_empty() {
                         println!("       identity: {}", ts.identity_attrs.join(", ").yellow());
                     }
+                    // The pinned OIDC provider configuration (api = "oidc" only).
+                    // client_secret's value is never printed, only whether it is set.
+                    if let Some(oidc) = &ts.oidc {
+                        println!("         issuer: {}", oidc.issuer.yellow());
+                        println!("       jwks_uri: {}", oidc.jwks_uri.yellow());
+                        println!("      client_id: {}", oidc.client_id.yellow());
+                        println!(
+                            "  client_secret: {}",
+                            if oidc.client_secret.is_some() {
+                                "(set)".yellow()
+                            } else {
+                                "(none)".yellow().dimmed()
+                            }
+                        );
+                        println!("         scopes: {}", oidc.scopes.join(", ").yellow());
+                        println!(
+                            "        domains: {}",
+                            oidc.allowed_domains.join(", ").yellow()
+                        );
+                        println!(
+                            "   max_auth_age: {}",
+                            format!("{}s", oidc.max_auth_age_seconds).yellow()
+                        );
+                        println!(
+                            " offline_access: {}",
+                            format!("{}", oidc.allow_offline_access).yellow()
+                        );
+                        println!(
+                            "     jwks_proxy: {}",
+                            match &oidc.jwks_proxy_service {
+                                Some(svc) => svc.yellow(),
+                                None => "(none: direct egress)".yellow().dimmed(),
+                            }
+                        );
+                        let seed_keys = serde_json::from_str::<serde_json::Value>(&oidc.seed_jwks)
+                            .ok()
+                            .and_then(|v| v.get("keys").and_then(|k| k.as_array().map(|a| a.len())))
+                            .unwrap_or(0);
+                        println!(
+                            "      seed_jwks: {}",
+                            format!("{} keys", seed_keys).yellow()
+                        );
+                    }
                 }
                 Err(e) => {
                     println!(

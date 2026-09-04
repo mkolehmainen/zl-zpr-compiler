@@ -1,0 +1,48 @@
+# Deliberately failing: [services.google-vs] exists for the oidc TS `google`.
+# An oidc trusted service has no on-net service on either side.
+
+[nodes.n0]
+provider = [["device.zpr.adapter.cn", "node.zpr.org"]]
+zpr_address = "fd5a:5052:90de::1"
+
+[trusted_services.google]
+api             = "oidc"
+issuer          = "https://accounts.google.com"
+jwks_uri        = "https://www.googleapis.com/oauth2/v3/certs"
+client_id       = "1234567890-abcdef.apps.googleusercontent.com"
+scopes          = ["openid", "email", "profile"]
+allowed_domains = ["example.com", "eu.example.com"]
+service         = "google-jwks-proxy"
+
+expiration_seconds   = 43200
+
+returns_attributes = [
+  "sub   -> user.oidc-subject",
+  "email -> user.email",
+  "hd    -> user.domain",
+]
+identity_attributes = ["sub"]
+
+[protocols.http]
+l4protocol = "TCP"
+port = 80
+
+[protocols.tcp]
+l4protocol = "TCP"
+port = 3128
+
+[services.google-jwks-proxy]
+protocol = "tcp"
+port = 3128
+provider = [["device.zpr.adapter.cn", "proxy1.zpr"]]
+
+# The stray block: must fail the compile.
+[services.google-vs]
+protocol = "http"
+port = 8443
+provider = [["device.zpr.adapter.cn", "ghost.zpr.org"]]
+
+[services.Webby]
+protocol = "http"
+port = 80
+provider = [["device.zpr.adapter.cn", "webby.zpr.org"]]

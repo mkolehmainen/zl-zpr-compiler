@@ -257,9 +257,10 @@ impl<T: PolicyWriter> PolicyBuilder<T> {
                 }
 
                 ServiceType::Trusted(ref api) => {
-                    // Only a `file` trusted service may have no protocol; all network-facing
-                    // services must carry one.
-                    if svc.protocol.is_none() && api != zpl::TS_API_FILE {
+                    // Only trusted services with no network presence (`file`, `oidc`)
+                    // may have no protocol; all network-facing services must carry one.
+                    if svc.protocol.is_none() && api != zpl::TS_API_FILE && api != zpl::TS_API_OIDC
+                    {
                         return Err(CompilationError::BuildError(format!(
                             "trusted service {} of type '{}' is missing a protocol",
                             svc.fabric_id, api

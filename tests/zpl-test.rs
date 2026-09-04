@@ -943,3 +943,352 @@ fn test_over_clause_with_unconfigured_value_warns_but_compiles() {
     // `compile()` returns unit on success, so it cannot be inspected from here, and --werror
     // would trip on the unrelated "no policy granting admin access to VisaService" warning first.
 }
+
+// ---- zipline#6: `api = "oidc"` trusted services — end-to-end + error paths ----
+
+/// Compile `<stem>.zpl` (with its companion `<stem>.zplc`) expecting a compilation
+/// error; returns the error text.
+fn compile_expect_err(stem: &str, temp: &TempDir) -> String {
+    let path = get_zpl_dir().join(format!("{stem}.zpl"));
+    let cb = CompilationBuilder::new(path)
+        .output_format(OutputFormat::V2)
+        .output_directory(&temp.path);
+    let mut comp = cb.build();
+    comp.compile()
+        .expect_err(&format!("{stem}.zpl must fail to compile"))
+        .to_string()
+}
+
+#[test]
+fn test_oidc_trusted_service_end_to_end() {
+    let temp = TempDir::new("oidc-e2e");
+    let pbytes = compile_policy_bytes("test-oidc", &temp);
+    let rdr = capnp::serialize::read_message(
+        &mut Cursor::new(pbytes.as_slice()),
+        capnp::message::ReaderOptions::new(),
+    )
+    .unwrap();
+    let policy = rdr.get_root::<policy_capnp::policy::Reader>().unwrap();
+
+    // --- exactly one TrustedService record: google, with the OidcConfig ---
+    assert!(
+        policy.has_trusted_services(),
+        "policy must have trustedServices"
+    );
+    let records = decode_records(&policy);
+    let ids: Vec<&str> = records.iter().map(|r| r.service_id.as_str()).collect();
+    assert_eq!(ids, vec!["google"]);
+
+    let google = &records[0];
+    assert_eq!(google.expiration_seconds, 43200);
+    assert_eq!(google.identity_attrs, vec!["sub".to_string()]);
+    // TOML declaration order preserved.
+    assert_eq!(
+        mappings(google),
+        vec![
+            ("sub", "user.oidc-subject"),
+            ("email", "user.email"),
+            ("hd", "user.domain"),
+        ]
+    );
+
+    let oidc = google.oidc.as_ref().expect("google must carry OidcConfig");
+    assert_eq!(oidc.issuer, "https://accounts.google.com");
+    assert_eq!(oidc.jwks_uri, "https://www.googleapis.com/oauth2/v3/certs");
+    assert_eq!(
+        oidc.client_id,
+        "1234567890-abcdef.apps.googleusercontent.com"
+    );
+    assert_eq!(oidc.client_secret, None, "fixture omits client_secret");
+    assert_eq!(oidc.scopes, vec!["openid", "email", "profile"]);
+    assert_eq!(oidc.allowed_domains, vec!["example.com", "eu.example.com"]);
+    assert_eq!(oidc.max_auth_age_seconds, 86400);
+    assert!(!oidc.allow_offline_access);
+    assert_eq!(
+        oidc.jwks_proxy_service.as_deref(),
+        Some("google-jwks-proxy")
+    );
+
+    // seed_jwks embedded verbatim: a JWKS document with two keys.
+    let seed: serde_json::Value =
+        serde_json::from_str(&oidc.seed_jwks).expect("seed_jwks must be valid JSON");
+    assert_eq!(
+        seed["keys"].as_array().expect("top-level keys array").len(),
+        2,
+        "seed JWKS must have 2 keys"
+    );
+
+    // --- the woven JWKS-proxy rule: a client policy on google-jwks-proxy
+    // selected by exactly device.zpr.adapter.cn EQ vs.zpr ---
+    let mut proxy_rule_found = false;
+    for cp in policy.get_com_policies().unwrap().iter() {
+        if cp.get_service_id().unwrap().to_str().unwrap() != "google-jwks-proxy" {
+            continue;
+        }
+        proxy_rule_found = true;
+        let conds = cp.get_client_conds().unwrap();
+        assert_eq!(conds.len(), 1, "proxy rule must have one client condition");
+        let e = conds.get(0);
+        assert_eq!(
+            e.get_key().unwrap().to_str().unwrap(),
+            "device.zpr.adapter.cn"
+        );
+        assert!(matches!(e.get_op().unwrap(), policy_capnp::AttrOp::Eq));
+        let vals: Vec<&str> = e
+            .get_value()
+            .unwrap()
+            .iter()
+            .map(|v| v.unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(vals, vec!["vs.zpr"]);
+    }
+    assert!(
+        proxy_rule_found,
+        "woven visa-service rule targeting google-jwks-proxy not found"
+    );
+
+    // --- google join Service: Trusted("oidc") with zero endpoints (file-style early-out) ---
+    let mut google_svc_found = false;
+    for jp in policy.get_join_policies().unwrap().iter() {
+        let provides = match jp.get_provides() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let svc = match provides
+            .iter()
+            .find(|s| s.get_id().unwrap().to_str().unwrap() == "google")
+        {
+            Some(s) => s,
+            None => continue,
+        };
+        google_svc_found = true;
+        match svc.get_kind().which().unwrap() {
+            policy_capnp::service::kind::Which::Trusted(n) => {
+                assert_eq!(n.unwrap().to_str().unwrap(), "oidc")
+            }
+            _ => panic!("google must be Trusted(oidc)"),
+        }
+        assert_eq!(
+            svc.get_endpoints().unwrap().len(),
+            0,
+            "oidc service must have zero endpoints"
+        );
+    }
+    assert!(google_svc_found, "google join Service not found");
+}
+
+#[test]
+fn test_oidc_stray_services_block_rejected() {
+    let temp = TempDir::new("oidc-stray-svc");
+    let msg = compile_expect_err("bad-oidc-services-block", &temp);
+    assert!(
+        msg.contains(
+            "trusted_service google: api=\"oidc\" has no on-net service; remove [services.google-vs]"
+        ),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn test_oidc_missing_proxy_service_rejected() {
+    let temp = TempDir::new("oidc-missing-proxy");
+    let msg = compile_expect_err("bad-oidc-missing-proxy-service", &temp);
+    assert!(
+        msg.contains("trusted_service google: service \"nope\" is not declared in [services]"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn test_oidc_proxy_provider_trusted_service_dependency_woven() {
+    // (zipline#6 review) The JWKS proxy's provider attributes may resolve through
+    // a trusted service used nowhere else (`attrfile` via device.color). That
+    // dependency must be discovered before the trusted services are woven, or
+    // `attrfile` silently gets no TrustedService record or connect entry.
+    let temp = TempDir::new("oidc-proxy-provider-ts");
+    let pbytes = compile_policy_bytes("test-oidc-proxy-provider-ts", &temp);
+    let rdr = capnp::serialize::read_message(
+        &mut Cursor::new(pbytes.as_slice()),
+        capnp::message::ReaderOptions::new(),
+    )
+    .unwrap();
+    let policy = rdr.get_root::<policy_capnp::policy::Reader>().unwrap();
+
+    // Both trusted services must have metadata records (sorted weave order).
+    let records = decode_records(&policy);
+    let ids: Vec<&str> = records.iter().map(|r| r.service_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["attrfile", "google"],
+        "trusted service discovered only via the proxy provider must still be woven"
+    );
+
+    // And attrfile must appear as a Trusted("file") join Service.
+    let mut attrfile_found = false;
+    for jp in policy.get_join_policies().unwrap().iter() {
+        let provides = match jp.get_provides() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if provides
+            .iter()
+            .any(|s| s.get_id().unwrap().to_str().unwrap() == "attrfile")
+        {
+            attrfile_found = true;
+        }
+    }
+    assert!(attrfile_found, "attrfile join Service not found");
+}
+
+/// Build and compile an oidc fixture in a temp dir whose `[services]` proxy id is
+/// `svc_id`; returns the compilation error text (panics if it compiles).
+fn compile_oidc_proxy_id_expect_err(tag: &str, svc_id: &str) -> String {
+    let temp = TempDir::new(tag);
+    let zpl_path = temp.path.join("fixture.zpl");
+    std::fs::write(
+        &zpl_path,
+        "define Webby as a service.\nallow domain:'example.com' users to access Webby.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path.join("fixture.zplc"),
+        format!(
+            r#"
+[nodes.n0]
+provider = [["device.zpr.adapter.cn", "node.zpr.org"]]
+zpr_address = "fd5a:5052:90de::1"
+
+[trusted_services.google]
+api             = "oidc"
+issuer          = "https://accounts.google.com"
+jwks_uri        = "https://www.googleapis.com/oauth2/v3/certs"
+client_id       = "1234567890-abcdef.apps.googleusercontent.com"
+allowed_domains = ["example.com"]
+expiration_seconds = 43200
+returns_attributes = ["sub -> user.oidc-subject", "hd -> user.domain"]
+identity_attributes = ["sub"]
+service = "{svc_id}"
+
+[protocols.http]
+l4protocol = "TCP"
+port = 80
+
+[protocols.tcp]
+l4protocol = "TCP"
+port = 3128
+
+[services."{svc_id}"]
+protocol = "tcp"
+port = 3128
+provider = [["device.zpr.adapter.cn", "proxy1.zpr"]]
+
+[services.Webby]
+protocol = "http"
+port = 80
+provider = [["device.zpr.adapter.cn", "webby.zpr.org"]]
+"#
+        ),
+    )
+    .unwrap();
+
+    let out = TempDir::new(&format!("{tag}-out"));
+    let cb = CompilationBuilder::new(zpl_path)
+        .output_format(OutputFormat::V2)
+        .output_directory(&out.path);
+    let mut comp = cb.build();
+    comp.compile()
+        .expect_err(&format!("proxy id {svc_id:?} must fail to compile"))
+        .to_string()
+}
+
+#[test]
+fn test_oidc_proxy_id_with_spaces_rejected() {
+    // (zipline#6 review) set_connects/set_policies canonicalize service ids
+    // (spaces -> underscores) but OidcConfig.jwks_proxy_service stored the raw
+    // name, so a quoted id with spaces made the VS look up a nonexistent
+    // service. Reject ids that would need mangling.
+    let msg = compile_oidc_proxy_id_expect_err("oidc-proxy-spaces", "google jwks proxy");
+    assert!(
+        msg.contains(
+            "trusted_service google: service \"google jwks proxy\" contains spaces; \
+             the policy stores canonicalized service ids (spaces become underscores), \
+             so the stored proxy id would never match -- rename the [services] entry"
+        ),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn test_oidc_proxy_id_colliding_with_trusted_service_rejected() {
+    // (zipline#6 review) service = "google" with [services.google] previously
+    // failed deep in add_trusted_service with a confusing "duplicate trusted
+    // service" error. The collision must be diagnosed explicitly.
+    let msg = compile_oidc_proxy_id_expect_err("oidc-proxy-collision", "google");
+    assert!(
+        msg.contains(
+            "trusted_service google: service \"google\" collides with the id of a \
+             trusted service; the JWKS proxy must use a distinct [services] id"
+        ),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn test_seed_jwks_not_a_jwks_document_rejected() {
+    // A seed_jwks file that is valid JSON but has no top-level `keys` array is
+    // not a JWKS document. Built in a temp dir so no bad fixture is swept.
+    let temp = TempDir::new("oidc-bad-seed");
+    let zpl_path = temp.path.join("bad-seed.zpl");
+    let zplc_path = temp.path.join("bad-seed.zplc");
+    std::fs::write(
+        &zpl_path,
+        "define Webby as a service.\nallow domain:'example.com' users to access Webby.\n",
+    )
+    .unwrap();
+    std::fs::write(temp.path.join("not-a-jwks.json"), "{\"nokeys\": true}\n").unwrap();
+    std::fs::write(
+        &zplc_path,
+        r#"
+[nodes.n0]
+provider = [["device.zpr.adapter.cn", "node.zpr.org"]]
+zpr_address = "fd5a:5052:90de::1"
+
+[trusted_services.google]
+api             = "oidc"
+issuer          = "https://accounts.google.com"
+jwks_uri        = "https://www.googleapis.com/oauth2/v3/certs"
+client_id       = "1234567890-abcdef.apps.googleusercontent.com"
+allowed_domains = ["example.com"]
+seed_jwks       = "not-a-jwks.json"
+expiration_seconds = 43200
+returns_attributes = ["sub -> user.oidc-subject", "hd -> user.domain"]
+identity_attributes = ["sub"]
+
+[protocols.http]
+l4protocol = "TCP"
+port = 80
+
+[services.Webby]
+protocol = "http"
+port = 80
+provider = [["device.zpr.adapter.cn", "webby.zpr.org"]]
+"#,
+    )
+    .unwrap();
+
+    let out = TempDir::new("oidc-bad-seed-out");
+    let cb = CompilationBuilder::new(zpl_path)
+        .output_format(OutputFormat::V2)
+        .output_directory(&out.path);
+    let mut comp = cb.build();
+    let msg = comp
+        .compile()
+        .expect_err("a seed_jwks without a top-level keys array must not compile")
+        .to_string();
+    assert!(
+        msg.contains(
+            "trusted_service google: seed_jwks \"not-a-jwks.json\" is not a JWKS document"
+        ),
+        "unexpected error: {msg}"
+    );
+}
