@@ -294,6 +294,8 @@ impl Fabric {
                 expiration_seconds: spec.expiration_seconds,
                 returns_attrs: spec.returns_attrs,
                 identity_attrs: spec.identity_attrs,
+                // Populated for api = "oidc" services in the oidc weaving arm.
+                oidc: None,
             }),
         };
         self.services.push(fs);
