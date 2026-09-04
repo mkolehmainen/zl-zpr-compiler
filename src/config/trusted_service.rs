@@ -14,6 +14,10 @@ use crate::zpl;
 use super::{OidcTsConfig, TrustedService, parse_provider};
 
 fn warn_unknown_ts_property(ts: &Table, ctx: &CompilationCtx) -> Result<(), CompilationError> {
+    // Property names recognized only when `api = "oidc"`. For every other api
+    // they must stay unknown, so a stray `issuer` on a `file` service still
+    // trips the unknown-property warning (fatal under --werror).
+    let is_oidc = ts.get("api").and_then(|v| v.as_str()) == Some(zpl::TS_API_OIDC);
     for elem in ts.keys() {
         match elem.as_str() {
             "cert_path" => (),
@@ -26,15 +30,16 @@ fn warn_unknown_ts_property(ts: &Table, ctx: &CompilationCtx) -> Result<(), Comp
             "identity_attributes" => (),
             "expiration_seconds" => (),
             // api = "oidc" properties
-            "issuer" => (),
-            "jwks_uri" => (),
-            "client_id" => (),
-            "client_secret" => (),
-            "scopes" => (),
-            "allowed_domains" => (),
-            "seed_jwks" => (),
-            "max_auth_age_seconds" => (),
-            "allow_offline_access" => (),
+            "issuer"
+            | "jwks_uri"
+            | "client_id"
+            | "client_secret"
+            | "scopes"
+            | "allowed_domains"
+            | "seed_jwks"
+            | "max_auth_age_seconds"
+            | "allow_offline_access"
+                if is_oidc => {}
             _ => ctx.warn(&format!(
                 "unknown property '{elem}' detected while parsing trusted_services",
             ))?,
@@ -199,6 +204,17 @@ fn parse_file_trusted_service(
     })
 }
 
+/// True when `s` is an `https://` URL with a non-empty host component.
+/// Deliberately minimal (no new dependency): scheme prefix plus a non-empty
+/// authority ahead of any path — enough to reject `https://` / `https:///path`
+/// while leaving full well-formedness to the eventual HTTP client.
+fn is_https_url_with_host(s: &str) -> bool {
+    match s.strip_prefix("https://") {
+        None => false,
+        Some(rest) => !rest.split('/').next().unwrap_or_default().is_empty(),
+    }
+}
+
 /// An `api = "oidc"` trusted service declares an off-net OpenID Connect
 /// identity provider (see spec-OIDC.md "ZPLC configuration"). The adapter is
 /// the Relying Party, so `client` is not allowed; the provider is off-net, so
@@ -243,7 +259,7 @@ fn parse_oidc_trusted_service(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    if !issuer.starts_with("https://") || issuer.contains('?') || issuer.contains('#') {
+    if !is_https_url_with_host(&issuer) || issuer.contains('?') || issuer.contains('#') {
         return Err(err_config!(
             "trusted_service {}: issuer must be an https URL without query or fragment",
             ts_id
@@ -256,7 +272,7 @@ fn parse_oidc_trusted_service(
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
-    if !jwks_uri.starts_with("https://") {
+    if !is_https_url_with_host(&jwks_uri) {
         return Err(err_config!(
             "trusted_service {}: jwks_uri is required and must be https",
             ts_id
@@ -403,11 +419,21 @@ fn parse_oidc_trusted_service(
             ))?;
             None
         }
-        Some(v) => Some(
-            v.as_str()
+        Some(v) => {
+            let svc = v
+                .as_str()
                 .ok_or(err_config!("trusted_service {} service parse error", ts_id))?
-                .to_string(),
-        ),
+                .to_string();
+            // An empty id cannot identify the declared JWKS service and would
+            // silently suppress the direct-egress warning above.
+            if svc.is_empty() {
+                return Err(err_config!(
+                    "trusted_service {}: \"service\" must not be empty; omit it if the provider is reached by direct internet egress",
+                    ts_id
+                ));
+            }
+            Some(svc)
+        }
     };
 
     Ok(TrustedService {
@@ -883,6 +909,8 @@ mod test {
             "issuer = \"http://accounts.google.com\"",   // not https
             "issuer = \"https://idp.example.com?x=1\"",  // query
             "issuer = \"https://idp.example.com#frag\"", // fragment
+            "issuer = \"https://\"",                     // scheme only, no host
+            "issuer = \"https:///path\"",                // empty host
             "issuer = 42",                               // not a string
         ] {
             let t = oidc_with("issuer =", bad);
@@ -897,7 +925,12 @@ mod test {
 
     #[test]
     fn test_oidc_jwks_uri_rules() {
-        for bad in ["", "jwks_uri = \"http://x.example.com/certs\""] {
+        for bad in [
+            "",
+            "jwks_uri = \"http://x.example.com/certs\"",
+            "jwks_uri = \"https://\"",
+            "jwks_uri = \"https:///certs\"",
+        ] {
             let t = oidc_with("jwks_uri =", bad);
             let err = parse_trusted_service("google", &t, &CompilationCtx::default()).unwrap_err();
             assert_eq!(
@@ -1038,6 +1071,43 @@ mod test {
         // Without werror it parses, with no service recorded.
         let ts = parse_trusted_service("google", &t, &CompilationCtx::default()).unwrap();
         assert!(ts.service.is_none());
+    }
+
+    #[test]
+    fn test_oidc_empty_service_rejected() {
+        let t = oidc_with("service =", "service = \"\"");
+        let err = parse_trusted_service("google", &t, &CompilationCtx::default()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "configuration error: trusted_service google: \"service\" must not be empty; omit it if the provider is reached by direct internet egress"
+        );
+    }
+
+    #[test]
+    fn test_oidc_only_keys_unknown_for_other_apis() {
+        // OIDC-only property names must stay unknown outside api = "oidc":
+        // under --werror a file service carrying `issuer` must fail the
+        // unknown-property check, not be silently accepted.
+        let t = body(
+            r#"
+            api = "file"
+            issuer = "https://accounts.google.com"
+            returns_attributes = ["color -> user.color"]
+            "#,
+        );
+        let err =
+            parse_trusted_service("attrfile", &t, &CompilationCtx::new(false, true)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "warning: unknown property 'issuer' detected while parsing trusted_services"
+        );
+        // And the oidc parser still accepts its own properties (no warning).
+        parse_trusted_service(
+            "google",
+            &body(&oidc_minimal()),
+            &CompilationCtx::new(false, true),
+        )
+        .unwrap();
     }
 
     #[test]
