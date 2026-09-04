@@ -9,7 +9,7 @@ use std::net::IpAddr;
 use crate::errors::CompilationError;
 use crate::protocols::{PortSpec, Protocol};
 use crate::ptypes::Signal;
-use zpr::policy_types::{AttrMapping, Attribute, ServiceType, TrustedService};
+use zpr::policy_types::{AttrMapping, Attribute, OidcConfig, ServiceType, TrustedService};
 
 /// A service oriented view of the network.
 #[derive(Debug, Clone, Default)]
@@ -47,6 +47,8 @@ pub struct TrustedServiceSpec {
     pub returns_attrs: Vec<AttrMapping>,
     pub identity_attrs: Vec<String>,
     pub expiration_seconds: u32,
+    /// Pinned provider configuration, set only when `api = "oidc"`.
+    pub oidc: Option<OidcConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -294,8 +296,7 @@ impl Fabric {
                 expiration_seconds: spec.expiration_seconds,
                 returns_attrs: spec.returns_attrs,
                 identity_attrs: spec.identity_attrs,
-                // Populated for api = "oidc" services in the oidc weaving arm.
-                oidc: None,
+                oidc: spec.oidc,
             }),
         };
         self.services.push(fs);

@@ -3,7 +3,7 @@
 use base64::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv6Addr;
-use zpr::policy_types::{AttrDomain, Attribute, ServiceType};
+use zpr::policy_types::{AttrDomain, AttrMapping, Attribute, OidcConfig, ServiceType};
 
 use crate::compilation::Compilation;
 use crate::config_api::{ConfigApi, ConfigItem};
@@ -1196,11 +1196,12 @@ impl Weaver {
                 checked_services.insert(ts_name.clone());
 
                 // A `file` service is offered by the Visa Service itself and has no provider
-                // attributes to resolve.
+                // attributes to resolve. An `oidc` provider is off-net; the VS is likewise
+                // its sole (implicit) provider.
                 let ts_api = config
                     .must_get(&format!("/trusted_services/{ts_name}/api"))
                     .to_string();
-                if ts_api == zpl::TS_API_FILE {
+                if ts_api == zpl::TS_API_FILE || ts_api == zpl::TS_API_OIDC {
                     continue;
                 }
 
@@ -1280,6 +1281,20 @@ impl Weaver {
                 continue;
             }
 
+            // An `oidc` service is an off-net identity provider. Like `file` it has
+            // no ZPR network presence (no protocol, provider, cert, or client), so it
+            // takes the same early-out shape; unlike `file` it carries an OidcConfig
+            // and may name an on-net JWKS proxy service to weave a rule for.
+            if ts_api == zpl::TS_API_OIDC {
+                self.add_oidc_trusted_service(
+                    config,
+                    &ts_name,
+                    ts_returns_attrs,
+                    expiration_seconds,
+                )?;
+                continue;
+            }
+
             let client_svc = config
                 .must_get(&format!("/trusted_services/{ts_name}/client_service"))
                 .to_string();
@@ -1335,6 +1350,7 @@ impl Weaver {
                     returns_attrs: ts_returns_attrs,
                     identity_attrs: ts_identity_attrs,
                     expiration_seconds,
+                    oidc: None,
                 })
                 .map_err(|e| {
                     CompilationError::ConfigError(format!("error adding trusted service: {}", e))
@@ -1354,6 +1370,168 @@ impl Weaver {
                 false,
                 &ts_name,
                 &vs_access_attrs,
+                &[],
+                &[], // no link constraints on the trusted service policy
+                true,
+                None,
+                &pline,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Weave an `api = "oidc"` trusted service (zipline#6).
+    ///
+    /// The provider is off-net, so the woven service has the file-style shape:
+    /// the VS `cn == vs.zpr` as sole provider attribute, no protocol, and an
+    /// `OidcConfig` carrying the pinned provider configuration. When the config
+    /// declares a JWKS proxy `service`, the compiler also adds the
+    /// visa-service access rule targeting that fabric service.
+    fn add_oidc_trusted_service(
+        &mut self,
+        config: &ConfigApi,
+        ts_name: &str,
+        ts_returns_attrs: Vec<AttrMapping>,
+        expiration_seconds: u32,
+    ) -> Result<(), CompilationError> {
+        // Identity attributes: the config parser enforces ["sub"] for oidc.
+        let ts_identity_attrs =
+            match config.get(&format!("/trusted_services/{ts_name}/id_attributes")) {
+                Some(ConfigItem::KeySet(attrs)) => attrs,
+                _ => Vec::new(),
+            };
+
+        // The optional JWKS proxy service. When declared it must exist in
+        // [services.*]; the woven rule targets it.
+        let proxy_service_id = match config.get(&format!("/trusted_services/{ts_name}/vs_service"))
+        {
+            Some(ConfigItem::StrVal(name)) => {
+                if config.get(&format!("/services/{name}")).is_none() {
+                    return Err(CompilationError::ConfigError(format!(
+                        "trusted_service {ts_name}: service \"{name}\" is not declared in [services]"
+                    )));
+                }
+                // The proxy is reached only by the visa service, so no ZPL names
+                // it and init_services never weaves it. Add it here from its
+                // config declaration (skipped if some ZPL did reference it).
+                if !self.fabric.has_service(&name) {
+                    let prot = match config.get(&format!("/services/{name}/protocol")) {
+                        Some(citem @ ConfigItem::Protocol(_, _, _)) => citem.try_into_protocol()?,
+                        _ => {
+                            return Err(CompilationError::ConfigError(format!(
+                                "protocol for service {name} not found in configuration"
+                            )));
+                        }
+                    };
+                    let provider_attrs = match config.get(&format!("/services/{name}/provider")) {
+                        Some(ConfigItem::AttrList(alist)) => vec_to_attributes(&alist)?,
+                        _ => {
+                            return Err(CompilationError::ConfigError(format!(
+                                "service {name} missing provider attributes"
+                            )));
+                        }
+                    };
+                    let resolved = self.resolve_attributes(&provider_attrs, config)?;
+                    self.fabric
+                        .add_service(&name, &prot, &resolved, ServiceType::Regular)?;
+                }
+                Some(name)
+            }
+            _ => None, // omitted: B1 already warned about direct egress
+        };
+
+        // An oidc trusted service has no on-net service on either side, so a
+        // conventionally-named [services.<id>*] block that is not the declared
+        // proxy is a leftover from a validation/2-style setup. Fail loudly.
+        for name in [
+            ts_name.to_string(),
+            format!("{ts_name}-vs"),
+            format!("{ts_name}-client"),
+        ] {
+            if Some(&name) == proxy_service_id.as_ref() {
+                continue;
+            }
+            if config.get(&format!("/services/{name}")).is_some() {
+                return Err(CompilationError::ConfigError(format!(
+                    "trusted_service {ts_name}: api=\"oidc\" has no on-net service; remove [services.{name}]"
+                )));
+            }
+        }
+
+        // Seed JWKS: read relative to the .zplc directory, require a JSON
+        // document with a top-level `keys` array, and embed it verbatim.
+        let oidc_cfg = config.get_oidc_ts_config(ts_name).ok_or_else(|| {
+            CompilationError::ConfigError(format!(
+                "trusted_service {ts_name}: api=\"oidc\" but no oidc configuration"
+            ))
+        })?;
+        let seed_jwks = match &oidc_cfg.seed_jwks_path {
+            Some(path) => {
+                let abs_path = config.resolve_config_path(path);
+                let contents = std::fs::read_to_string(&abs_path).map_err(|e| {
+                    CompilationError::ConfigError(format!(
+                        "trusted_service {ts_name}: failed to read seed_jwks \"{}\": {e}",
+                        path.display()
+                    ))
+                })?;
+                let parsed: Result<serde_json::Value, _> = serde_json::from_str(&contents);
+                let is_jwks = parsed
+                    .as_ref()
+                    .map(|v| v.get("keys").is_some_and(|k| k.is_array()))
+                    .unwrap_or(false);
+                if !is_jwks {
+                    return Err(CompilationError::ConfigError(format!(
+                        "trusted_service {ts_name}: seed_jwks \"{}\" is not a JWKS document",
+                        path.display()
+                    )));
+                }
+                contents
+            }
+            None => String::new(), // absent -> "" on the wire
+        };
+
+        let oidc = OidcConfig {
+            issuer: oidc_cfg.issuer.clone(),
+            jwks_uri: oidc_cfg.jwks_uri.clone(),
+            client_id: oidc_cfg.client_id.clone(),
+            client_secret: oidc_cfg.client_secret.clone(),
+            scopes: oidc_cfg.scopes.clone(),
+            allowed_domains: oidc_cfg.allowed_domains.clone(),
+            max_auth_age_seconds: oidc_cfg.max_auth_age_seconds,
+            allow_offline_access: oidc_cfg.allow_offline_access,
+            seed_jwks,
+            jwks_proxy_service: proxy_service_id.clone(),
+        };
+
+        let vs_cn_attr = Attribute::tuple(zpl::KATTR_CN)
+            .single()
+            .value(zpl::VISA_SERVICE_CN)
+            .build()?;
+        self.fabric
+            .add_trusted_service(TrustedServiceSpec {
+                id: ts_name.to_string(),
+                api: zpl::TS_API_OIDC.to_string(),
+                provider_attrs: vec![vs_cn_attr.clone()],
+                returns_attrs: ts_returns_attrs,
+                identity_attrs: ts_identity_attrs,
+                expiration_seconds,
+                oidc: Some(oidc),
+                ..Default::default()
+            })
+            .map_err(|e| {
+                CompilationError::ConfigError(format!("error adding trusted service: {}", e))
+            })?;
+
+        // The visa service can access the JWKS proxy (if one was declared).
+        if let Some(proxy_service_id) = proxy_service_id {
+            let pline = PLine::new_builtin(&format!(
+                "allow visa service access to trusted service {}",
+                ts_name
+            ));
+            self.fabric.add_condition_to_service(
+                false,
+                &proxy_service_id,
+                &[vs_cn_attr],
                 &[],
                 &[], // no link constraints on the trusted service policy
                 true,
@@ -1420,6 +1598,14 @@ impl Weaver {
                     // Since we do not get layer7 from the config api, we set it here.
                     // TODO: Pass the layer7 info across the api boundry.
                     vsp.set_layer7(ZPR_VALIDATION_2.to_string());
+                } else if ts_api == zpl::TS_API_FILE || ts_api == zpl::TS_API_OIDC {
+                    // Unreachable: `file` and `oidc` services take the early-out in
+                    // add_trusted_services and never get here. Guarded so the
+                    // unknown-API error below stays accurate if that ever changes.
+                    return Err(CompilationError::BuildError(format!(
+                        "trusted service {} with API {} has no visa-facing service",
+                        ts_name, ts_api
+                    )));
                 } else {
                     return Err(CompilationError::ConfigError(format!(
                         "trusted service {} has unknown API version {}",

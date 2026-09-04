@@ -639,6 +639,24 @@ impl ConfigApi {
         self.base_path.join(p)
     }
 
+    /// Resolve a config-relative path (e.g. an oidc `seed_jwks` file) against the
+    /// directory holding the `.zplc`, mirroring how certificate paths resolve.
+    pub fn resolve_config_path(&self, p: &Path) -> PathBuf {
+        self.abs_path(p)
+    }
+
+    /// Direct accessor for the parsed `api = "oidc"` configuration of a trusted
+    /// service. Structured data of this shape does not fit the string-oriented
+    /// pseudo-REST `get` API, so it is exposed as an inherent method.
+    pub fn get_oidc_ts_config(&self, ts_id: &str) -> Option<&config::OidcTsConfig> {
+        self.config
+            .trusted_services
+            .iter()
+            .find(|ts| ts.id == ts_id)?
+            .oidc
+            .as_ref()
+    }
+
     /// `key_path` here is everything after "zpr/visa_services"
     ///
     /// Note that `dock_node_id` may return None if not set in config.
