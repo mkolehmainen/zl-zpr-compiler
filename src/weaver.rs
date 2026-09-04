@@ -1202,6 +1202,25 @@ impl Weaver {
                     .must_get(&format!("/trusted_services/{ts_name}/api"))
                     .to_string();
                 if ts_api == zpl::TS_API_FILE || ts_api == zpl::TS_API_OIDC {
+                    // An oidc declaration may name an on-net JWKS proxy in
+                    // `service`; that service's provider attributes take part in
+                    // the dependency closure like any other provider attributes,
+                    // otherwise a trusted service used only by the proxy provider
+                    // is discovered after this closure is snapshotted and never
+                    // woven. Existence/shape errors are deferred to
+                    // add_oidc_trusted_service, which reports them with context.
+                    if ts_api == zpl::TS_API_OIDC {
+                        if let Some(ConfigItem::StrVal(name)) =
+                            config.get(&format!("/trusted_services/{ts_name}/vs_service"))
+                        {
+                            if let Some(ConfigItem::AttrList(alist)) =
+                                config.get(&format!("/services/{name}/provider"))
+                            {
+                                let proxy_provider_attrs = vec_to_attributes(&alist)?;
+                                let _ = self.resolve_attributes(&proxy_provider_attrs, config)?;
+                            }
+                        }
+                    }
                     continue;
                 }
 
@@ -1409,6 +1428,28 @@ impl Weaver {
                 if config.get(&format!("/services/{name}")).is_none() {
                     return Err(CompilationError::ConfigError(format!(
                         "trusted_service {ts_name}: service \"{name}\" is not declared in [services]"
+                    )));
+                }
+                // The stored OidcConfig.jwks_proxy_service must equal the id the
+                // policy emits for the service. set_connects/set_policies
+                // canonicalize ids (spaces become underscores), so an id that
+                // needs mangling would be stored under a name the VS can never
+                // look up. Reject it instead of storing a dangling reference.
+                if name.contains(' ') {
+                    return Err(CompilationError::ConfigError(format!(
+                        "trusted_service {ts_name}: service \"{name}\" contains spaces; \
+                         the policy stores canonicalized service ids (spaces become underscores), \
+                         so the stored proxy id would never match -- rename the [services] entry"
+                    )));
+                }
+                // A proxy id equal to any trusted-service id would collide in the
+                // fabric (trusted services are fabric services too) and fail later
+                // with a confusing "duplicate trusted service" error. Diagnose the
+                // collision here, where the configuration mistake is visible.
+                if config.must_get_keys("/trusted_services").contains(&name) {
+                    return Err(CompilationError::ConfigError(format!(
+                        "trusted_service {ts_name}: service \"{name}\" collides with the id of a \
+                         trusted service; the JWKS proxy must use a distinct [services] id"
                     )));
                 }
                 // The proxy is reached only by the visa service, so no ZPL names
