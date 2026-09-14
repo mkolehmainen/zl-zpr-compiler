@@ -2224,4 +2224,63 @@ mod test {
         trusted.sort();
         assert_eq!(trusted, vec!["inner", "outer"]);
     }
+
+    #[test]
+    fn test_identity_vendor_never_pruned() {
+        // `google` vends identity attributes (`identity_attributes = ["sub"]`), so it is
+        // a query key for every attribute store in the policy -- `happyfile`'s JSON is
+        // keyed by identity attribute and value. Nothing in the (simulated) ZPL
+        // references google's returned attributes, yet it must still be woven;
+        // only non-identity-vending services are pruned when unreferenced.
+        let cfg = r#"
+        [nodes.n0]
+        zpr_address = "fd5a:5052:90de::1"
+        provider = [["device.zpr.adapter.cn", "fee"]]
+
+        [trusted_services.happyfile]
+        api = "file"
+        returns_attributes = ["hair_color -> user.hair_color", "lazy -> #user.lazy"]
+        expiration_seconds = 3600
+
+        [trusted_services.google]
+        api = "oidc"
+        issuer = "https://accounts.google.com"
+        jwks_uri = "https://www.googleapis.com/oauth2/v3/certs"
+        client_id = "1234567890-abcdef.apps.googleusercontent.com"
+        allowed_domains = ["*"]
+        expiration_seconds = 3600
+        returns_attributes = ["sub -> user.sub", "email -> user.email"]
+        identity_attributes = ["sub"]
+        "#;
+        let ctx = CompilationCtx::default();
+        let config = ConfigApi::new_from_toml_content(cfg, &env::temp_dir(), &ctx)
+            .expect("failed to parse config");
+
+        let mut w = Weaver::new(WeavingContext::default());
+
+        // Reference only the file service's attribute: google stays unmarked.
+        let attr = Attribute::tuple("user.hair_color")
+            .single()
+            .value("red")
+            .build()
+            .unwrap();
+        w.resolve_attributes(&[attr], &config)
+            .expect("attr should resolve");
+        assert!(w.wctx.used_trusted_services.contains("happyfile"));
+        assert!(!w.wctx.used_trusted_services.contains("google"));
+
+        // Weaving must retain the identity vendor even though ZPL never
+        // references user.sub or user.email.
+        w.add_trusted_services(&config, &ctx)
+            .expect("add_trusted_services");
+        let mut trusted: Vec<&str> = w
+            .fabric
+            .services
+            .iter()
+            .filter(|s| matches!(s.service_type, ServiceType::Trusted(_)))
+            .map(|s| s.fabric_id.as_str())
+            .collect();
+        trusted.sort();
+        assert_eq!(trusted, vec!["google", "happyfile"]);
+    }
 }
