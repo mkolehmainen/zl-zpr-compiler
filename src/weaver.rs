@@ -1244,12 +1244,55 @@ impl Weaver {
         Ok(())
     }
 
+    /// Retain every trusted service that vends identity attributes, whether or not
+    /// any ZPL statement references its returned attributes.
+    ///
+    /// A trusted service declaring a non-empty `identity_attributes` is a query key
+    /// for every attribute store in the policy -- a `file` store's JSON is keyed by
+    /// identity attribute and value -- so whether ZPL references *its own* returned
+    /// attributes says nothing about whether the visa service needs it. Only `oidc`
+    /// and `validation/2` can reach this rule: the config parser rejects
+    /// `identity_attributes` on `api = "file"` and on the default service. Identity
+    /// vendors are never pruned; attribute overlays still are.
+    ///
+    /// Known trade-off: a `validation/2` service that declares `identity_attributes`
+    /// and is genuinely dead now gets woven, giving the visa service a network
+    /// dependency it previously pruned. This is the price of the rule and it is the
+    /// right price: the compiler cannot see a file store's JSON keys, so it cannot
+    /// prove an identity vendor is unused. The `ctx.info()` line makes each such
+    /// retention visible at build time (`info`, not `warn` -- for `oidc` this is the
+    /// normal case and must not trip `--Werror`).
+    fn retain_identity_vendors(&mut self, config: &ConfigApi, ctx: &CompilationCtx) {
+        let mut ts_names = config.must_get_keys("/trusted_services");
+        ts_names.sort(); // deterministic diagnostics
+        for ts_name in ts_names {
+            if ts_name == zpl::DEFAULT_TRUSTED_SERVICE_ID {
+                continue;
+            }
+            let id_attrs = match config.get(&format!("/trusted_services/{ts_name}/id_attributes")) {
+                Some(ConfigItem::KeySet(attrs)) => attrs,
+                _ => Vec::new(),
+            };
+            if id_attrs.is_empty() || self.wctx.used_trusted_services.contains(&ts_name) {
+                continue;
+            }
+            ctx.info(&format!(
+                "trusted service `{ts_name}` retained: vends identity attributes"
+            ));
+            self.wctx.add_used_trusted_service(ts_name);
+        }
+    }
+
     /// Add non-default trusted services to the fabric.
     fn add_trusted_services(
         &mut self,
         config: &ConfigApi,
         ctx: &CompilationCtx,
     ) -> Result<(), CompilationError> {
+        // Identity vendors are retained before the provider fixpoint runs, so a
+        // retained service's own provider attributes (a `validation/2` identity
+        // vendor; an `oidc` JWKS proxy) still resolve through it.
+        self.retain_identity_vendors(config, ctx);
         self.resolve_trusted_service_providers(config, ctx)?;
 
         // Copy the used trusted service names into a stand alone, sorted vector: it avoids
