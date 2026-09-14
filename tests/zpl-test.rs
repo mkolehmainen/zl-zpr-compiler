@@ -411,6 +411,59 @@ fn test_file_trusted_service_end_to_end() {
     );
 }
 
+// ---- zipline#23: identity vendors are never pruned ----
+
+#[test]
+fn test_identity_vendor_retained_end_to_end() {
+    // The master plan's Background configuration: `google` (oidc, vends
+    // identity attribute `sub`) plus `happyfile` (file store keyed on
+    // user.sub). The single relevant policy statement references only the
+    // file store's attribute, so nothing marks `google` used -- the
+    // identity-vendor rule must retain it, and BOTH services must appear
+    // in the emitted trustedServices.
+    let temp = TempDir::new("identity-vendor-e2e");
+    let pbytes = compile_policy_bytes("test-oidc-file-interplay", &temp);
+    let rdr = capnp::serialize::read_message(
+        &mut Cursor::new(pbytes.as_slice()),
+        capnp::message::ReaderOptions::new(),
+    )
+    .unwrap();
+    let policy = rdr.get_root::<policy_capnp::policy::Reader>().unwrap();
+
+    assert!(
+        policy.has_trusted_services(),
+        "policy must have trustedServices"
+    );
+    let records = decode_records(&policy);
+    let ids: Vec<&str> = records.iter().map(|r| r.service_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["google", "happyfile"],
+        "both the identity vendor and the file store must be woven"
+    );
+
+    // google: retained by the identity-vendor rule, with its OidcConfig intact.
+    let google = records.iter().find(|r| r.service_id == "google").unwrap();
+    assert_eq!(google.identity_attrs, vec!["sub".to_string()]);
+    assert_eq!(
+        mappings(google),
+        vec![("sub", "user.sub"), ("email", "user.email")]
+    );
+    let oidc = google.oidc.as_ref().expect("google must carry OidcConfig");
+    assert_eq!(oidc.issuer, "https://accounts.google.com");
+
+    // happyfile: retained by the ordinary attribute reference.
+    let happyfile = records
+        .iter()
+        .find(|r| r.service_id == "happyfile")
+        .unwrap();
+    assert!(happyfile.identity_attrs.is_empty());
+    assert_eq!(
+        mappings(happyfile),
+        vec![("hair_color", "user.hair_color"), ("lazy", "#user.lazy")]
+    );
+}
+
 #[test]
 fn test_validation2_regression() {
     // test-bas is validation/2-only; the sole new artifact is the `bas` trustedServices record.
