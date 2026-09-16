@@ -1153,6 +1153,30 @@ fn test_oidc_missing_proxy_service_rejected() {
 }
 
 #[test]
+fn test_oidc_offline_access_without_ceiling_rejected() {
+    // zipline#41: allow_offline_access without a session ceiling must fail.
+    let temp = TempDir::new("oidc-offline-no-ceiling");
+    let msg = compile_expect_err("bad-oidc-offline-no-ceiling", &temp);
+    assert!(
+        msg.contains(
+            "trusted_service google: allow_offline_access requires max_auth_age_seconds (the session ceiling)"
+        ),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn test_oidc_ceiling_below_expiration_rejected() {
+    // zipline#41: a non-zero ceiling below expiration_seconds must fail.
+    let temp = TempDir::new("oidc-ceiling-below-expiration");
+    let msg = compile_expect_err("bad-oidc-ceiling-below-expiration", &temp);
+    assert!(
+        msg.contains("trusted_service google: max_auth_age_seconds must be >= expiration_seconds"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
 fn test_oidc_proxy_provider_trusted_service_dependency_woven() {
     // (zipline#6 review) The JWKS proxy's provider attributes may resolve through
     // a trusted service used nowhere else (`attrfile` via device.color). That
