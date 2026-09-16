@@ -375,6 +375,24 @@ fn parse_oidc_trusted_service(
         ))?,
     };
 
+    // Offline access means refresh tokens, and a refresh token with no
+    // session ceiling would let a credential renew forever (zipline#41).
+    if allow_offline_access && max_auth_age_seconds == 0 {
+        return Err(err_config!(
+            "trusted_service {}: allow_offline_access requires max_auth_age_seconds (the session ceiling)",
+            ts_id
+        ));
+    }
+    // A ceiling below the credential lifetime is a contradiction: the
+    // credential would outlive the session that authorized it. Applies
+    // whenever the ceiling is set, offline access or not.
+    if max_auth_age_seconds != 0 && max_auth_age_seconds < expiration_seconds {
+        return Err(err_config!(
+            "trusted_service {}: max_auth_age_seconds must be >= expiration_seconds",
+            ts_id
+        ));
+    }
+
     // returns_attributes: required, >= 1 mapping; the reserved-namespace check
     // in parse_return_mappings applies (an oidc service is never the default).
     let returns_raw = parse_string_array(ts, "returns_attributes", "trusted_service")?;
