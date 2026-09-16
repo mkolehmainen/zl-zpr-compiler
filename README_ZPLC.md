@@ -249,9 +249,16 @@ Properties:
 * `expiration_seconds` - **Required** for `oidc`, and must be positive: the lifetime of
   the attributes this provider vouches for.
 * `max_auth_age_seconds` - Optional maximum age (in seconds) of the user's
-  authentication before re-authentication is required. Defaults to `0` (no limit).
+  authentication before re-authentication is required — the session ceiling. Must be a
+  non-negative integer that fits in a 32-bit unsigned value. Defaults to `0` (no limit),
+  but any **nonzero** value must be at least `expiration_seconds`: a ceiling below the
+  credential lifetime would let a credential outlive the session that authorized it, and
+  the compiler rejects it with `max_auth_age_seconds must be >= expiration_seconds`.
 * `allow_offline_access` - Optional boolean, default `false`. Whether to request
-  offline access (refresh tokens) from the provider.
+  offline access (refresh tokens) from the provider. Setting it to `true` **requires a
+  nonzero `max_auth_age_seconds`**: a refresh token with no session ceiling could renew
+  forever, so the compiler rejects the combination with `allow_offline_access requires
+  max_auth_age_seconds (the session ceiling)`.
 * `returns_attributes` - **Required**, at least one mapping, using the same `->` syntax
   as any other trusted service. The `zpr.` sub-namespace remains reserved.
 * `identity_attributes` - **Required** and must be exactly `["sub"]` — the OIDC subject
