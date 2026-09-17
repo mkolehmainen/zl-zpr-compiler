@@ -801,6 +801,33 @@ mod test {
         }
     }
 
+    // zipline#50 (hostname design gate, positive): a declared service may vend
+    // a multi-valued `device.*` attribute outside the `zpr.` sub-namespace --
+    // `device.hostname{}` is an ordinary domain attribute, not reserved.
+    #[test]
+    fn test_declared_service_device_hostname_multivalued_accepted() {
+        let t = body("api = \"file\"\nreturns_attributes = [\"h -> device.hostname{}\"]\n");
+        let ts = parse_trusted_service("attrfile", &t, &CompilationCtx::default())
+            .expect("device.hostname{} on a declared service must compile");
+        assert_eq!(ts.returns_attrs.len(), 1);
+        assert_eq!(ts.returns_attrs[0].service_attr_key, "h");
+        assert_eq!(ts.returns_attrs[0].zpr_attr_spec, "device.hostname{}");
+    }
+
+    // zipline#50 (negative): `device.zpr.hostname` sits inside the ZPR-owned
+    // `zpr.` sub-namespace, so a declared service claiming it is rejected with
+    // the "reserved for ZPR" error -- a hostname the platform vouches for
+    // cannot be forged via a trusted-service mapping.
+    #[test]
+    fn test_declared_service_device_zpr_hostname_rejected() {
+        let t = body("api = \"file\"\nreturns_attributes = [\"h -> device.zpr.hostname\"]\n");
+        let err = parse_trusted_service("attrfile", &t, &CompilationCtx::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("reserved for ZPR"),
+            "device.zpr.hostname gave: {err}"
+        );
+    }
+
     // The builtin default trusted service's own `device.zpr.adapter.cn`
     // mapping must still parse: the reservation applies to declared services
     // only.
