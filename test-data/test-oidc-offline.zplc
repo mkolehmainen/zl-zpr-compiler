@@ -1,0 +1,46 @@
+# Offline-access variant of test-oidc.zplc (zipline#41): refresh tokens are
+# allowed, so a session ceiling above the credential lifetime is declared.
+
+[nodes.n0]
+provider = [["device.zpr.adapter.cn", "node.zpr.org"]]
+zpr_address = "fd5a:5052:90de::1"
+
+[trusted_services.google]
+api             = "oidc"
+issuer          = "https://accounts.google.com"
+jwks_uri        = "https://www.googleapis.com/oauth2/v3/certs"
+client_id       = "1234567890-abcdef.apps.googleusercontent.com"
+scopes          = ["openid", "email", "profile"]
+allowed_domains = ["example.com", "eu.example.com"]
+service         = "google-jwks-proxy"
+
+expiration_seconds   = 3600
+max_auth_age_seconds = 43200
+allow_offline_access = true
+
+returns_attributes = [
+  "sub   -> user.oidc-subject",
+  "email -> user.email",
+  "hd    -> user.domain",
+]
+identity_attributes = ["sub"]
+
+[protocols.http]
+l4protocol = "TCP"
+port = 80
+
+[protocols.tcp]
+l4protocol = "TCP"
+port = 3128
+
+# The JWKS CONNECT proxy: an ordinary on-net service. The compiler weaves
+# the visa-service access rule for it; no hand-written ZPL is needed.
+[services.google-jwks-proxy]
+protocol = "tcp"
+port = 3128
+provider = [["device.zpr.adapter.cn", "proxy1.zpr"]]
+
+[services.Webby]
+protocol = "http"
+port = 80
+provider = [["device.zpr.adapter.cn", "webby.zpr.org"]]

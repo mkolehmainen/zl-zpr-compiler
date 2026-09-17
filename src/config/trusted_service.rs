@@ -375,6 +375,24 @@ fn parse_oidc_trusted_service(
         ))?,
     };
 
+    // Offline access means refresh tokens, and a refresh token with no
+    // session ceiling would let a credential renew forever (zipline#41).
+    if allow_offline_access && max_auth_age_seconds == 0 {
+        return Err(err_config!(
+            "trusted_service {}: allow_offline_access requires max_auth_age_seconds (the session ceiling)",
+            ts_id
+        ));
+    }
+    // A ceiling below the credential lifetime is a contradiction: the
+    // credential would outlive the session that authorized it. Applies
+    // whenever the ceiling is set, offline access or not.
+    if max_auth_age_seconds != 0 && max_auth_age_seconds < expiration_seconds {
+        return Err(err_config!(
+            "trusted_service {}: max_auth_age_seconds must be >= expiration_seconds",
+            ts_id
+        ));
+    }
+
     // returns_attributes: required, >= 1 mapping; the reserved-namespace check
     // in parse_return_mappings applies (an oidc service is never the default).
     let returns_raw = parse_string_array(ts, "returns_attributes", "trusted_service")?;
@@ -997,6 +1015,52 @@ mod test {
                 "case {bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_oidc_offline_access_requires_ceiling() {
+        // zipline#41: a refresh token with no session ceiling would let a
+        // credential renew forever, so allow_offline_access alone is rejected.
+        let mut src = oidc_minimal();
+        src.push_str("allow_offline_access = true\n");
+        let err =
+            parse_trusted_service("google", &body(&src), &CompilationCtx::default()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "configuration error: trusted_service google: allow_offline_access requires max_auth_age_seconds (the session ceiling)"
+        );
+    }
+
+    #[test]
+    fn test_oidc_max_auth_age_below_expiration_rejected() {
+        // zipline#41: the rule applies whenever max_auth_age_seconds is
+        // non-zero, with or without offline access — a ceiling below the
+        // credential lifetime is a contradiction.
+        let mut src = oidc_minimal(); // expiration_seconds = 3600
+        src.push_str("max_auth_age_seconds = 1800\n");
+        let err =
+            parse_trusted_service("google", &body(&src), &CompilationCtx::default()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "configuration error: trusted_service google: max_auth_age_seconds must be >= expiration_seconds"
+        );
+    }
+
+    #[test]
+    fn test_oidc_max_auth_age_equal_to_expiration_ok() {
+        // Boundary: a ceiling exactly equal to the credential lifetime parses.
+        let mut src = oidc_minimal(); // expiration_seconds = 3600
+        src.push_str("max_auth_age_seconds = 3600\n");
+        let ts = parse_trusted_service("google", &body(&src), &CompilationCtx::default()).unwrap();
+        assert_eq!(ts.oidc.unwrap().max_auth_age_seconds, 3600);
+
+        // And offline access with a positive ceiling parses.
+        let mut src = oidc_minimal();
+        src.push_str("max_auth_age_seconds = 43200\nallow_offline_access = true\n");
+        let ts = parse_trusted_service("google", &body(&src), &CompilationCtx::default()).unwrap();
+        let oidc = ts.oidc.unwrap();
+        assert!(oidc.allow_offline_access);
+        assert_eq!(oidc.max_auth_age_seconds, 43200);
     }
 
     #[test]
