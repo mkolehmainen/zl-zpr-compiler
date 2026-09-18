@@ -9,6 +9,17 @@
 // This lib.rs is here to allow the integration tests
 // to use the modules in the src directory.
 
+/// Build-identity string: `<pkg-version> (<git describe>)`, stamped by
+/// `build.rs` at build time (zipline#64). The suffix is
+/// `git describe --always --dirty --tags`, or the value of `ZPR_BUILD_ID`
+/// verbatim, or the literal `unknown` when neither is available.
+pub const BUILD_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("ZPR_BUILD_DESCRIBE"),
+    ")"
+);
+
 mod allow;
 pub mod compilation;
 pub mod compiler;

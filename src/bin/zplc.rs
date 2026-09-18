@@ -11,7 +11,7 @@ use zplc::crypto::load_rsa_private_key;
 /// visa service.
 #[derive(Debug, Parser)]
 #[command(name = "zpc")]
-#[command(version, verbatim_doc_comment)]
+#[command(version = zplc::BUILD_VERSION, verbatim_doc_comment)]
 struct Cli {
     /// Path to the ZPL file.
     #[arg(value_name = "ZPL_FILE")]
