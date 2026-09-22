@@ -1382,7 +1382,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1714,7 +1714,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zplc"
-version = "0.18.1"
+version = "0.19.0"
 dependencies = [
  "base64",
  "bytes",
@@ -1731,13 +1731,14 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.16",
  "toml",
+ "url",
  "zpr",
 ]
 
 [[package]]
 name = "zpr"
-version = "0.28.0"
-source = "git+https://github.com/mkolehmainen/zl-zpr-common.git?tag=v0.28.0#3abdacfe817c6de4dc0b315616c73d4a813e379b"
+version = "0.29.0"
+source = "git+https://github.com/mkolehmainen/zl-zpr-common.git?tag=v0.29.0#cecfd94d7e8ef7557449085346bca01b4afcb315"
 dependencies = [
  "base64",
  "bytes",

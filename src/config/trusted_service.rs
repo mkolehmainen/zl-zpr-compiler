@@ -11,13 +11,15 @@ use crate::err_config;
 use crate::errors::CompilationError;
 use crate::zpl;
 
-use super::{OidcTsConfig, TrustedService, parse_provider};
+use super::{AttrQueryTsConfig, OidcTsConfig, TrustedService, parse_provider};
 
 fn warn_unknown_ts_property(ts: &Table, ctx: &CompilationCtx) -> Result<(), CompilationError> {
     // Property names recognized only when `api = "oidc"`. For every other api
     // they must stay unknown, so a stray `issuer` on a `file` service still
     // trips the unknown-property warning (fatal under --werror).
     let is_oidc = ts.get("api").and_then(|v| v.as_str()) == Some(zpl::TS_API_OIDC);
+    // Likewise for the `api = "zpr-attr/1"` property names.
+    let is_attr_query = ts.get("api").and_then(|v| v.as_str()) == Some(zpl::TS_API_ATTR_QUERY);
     for elem in ts.keys() {
         match elem.as_str() {
             "cert_path" => (),
@@ -40,6 +42,8 @@ fn warn_unknown_ts_property(ts: &Table, ctx: &CompilationCtx) -> Result<(), Comp
             | "max_auth_age_seconds"
             | "allow_offline_access"
                 if is_oidc => {}
+            // api = "zpr-attr/1" properties
+            "url" | "ca_cert_path" | "timeout_seconds" if is_attr_query => {}
             _ => ctx.warn(&format!(
                 "unknown property '{elem}' detected while parsing trusted_services",
             ))?,
@@ -205,13 +209,23 @@ fn parse_file_trusted_service(
 }
 
 /// True when `s` is an `https://` URL with a non-empty host component.
-/// Deliberately minimal (no new dependency): scheme prefix plus a non-empty
-/// authority ahead of any path — enough to reject `https://` / `https:///path`
-/// while leaving full well-formedness to the eventual HTTP client.
+/// Parses with the `url` crate (already in the dependency tree via `zpr`)
+/// rather than substring checks, so malformed authorities such as
+/// `https://:443/x` or `https://user@/x` — nonempty authority, no usable
+/// host — are rejected here instead of at visa-service query time. One
+/// extra guard: the WHATWG parser collapses `https:///x` to host `x`, but
+/// an empty authority is far more likely a missing host than a real URL,
+/// so that spelling stays rejected.
 fn is_https_url_with_host(s: &str) -> bool {
-    match s.strip_prefix("https://") {
-        None => false,
-        Some(rest) => !rest.split('/').next().unwrap_or_default().is_empty(),
+    if !s
+        .strip_prefix("https://")
+        .is_some_and(|rest| !rest.starts_with('/'))
+    {
+        return false;
+    }
+    match url::Url::parse(s) {
+        Ok(u) => u.scheme() == "https" && u.host_str().is_some_and(|h| !h.is_empty()),
+        Err(_) => false,
     }
 }
 
@@ -476,6 +490,130 @@ fn parse_oidc_trusted_service(
     })
 }
 
+/// An `api = "zpr-attr/1"` trusted service declares a networked attribute
+/// service the visa service queries over HTTPS (docs/ATTRIBUTE_SERVICE.md,
+/// "Declaring an attribute service in policy"). Like `file` it is a decorating
+/// store keyed on other services' identities, so `identity_attributes` is
+/// rejected; the BAS-era `validation/2` machinery (`provider`, `client`,
+/// `cert_path`, `prefix`) has no meaning here and is rejected too. Each
+/// validation rule below has a dedicated unit test; the error text is the
+/// contract.
+fn parse_attr_query_trusted_service(
+    ts_id: &str,
+    ts: &Table,
+    expiration_seconds: u32,
+) -> Result<TrustedService, CompilationError> {
+    // BAS-era and file-style properties that make no sense here.
+    for forbidden in [
+        "identity_attributes",
+        "provider",
+        "client",
+        "cert_path",
+        "prefix",
+    ] {
+        if ts.contains_key(forbidden) {
+            return Err(err_config!(
+                "trusted_service {} with api \"{}\" does not allow property '{}'",
+                ts_id,
+                zpl::TS_API_ATTR_QUERY,
+                forbidden
+            ));
+        }
+    }
+
+    // `service` is reserved: it will one day name a ZPR service through which
+    // the visa service reaches an on-net attribute service (the
+    // jwks_proxy_service pattern). Reject it with a message saying so.
+    if ts.contains_key("service") {
+        return Err(err_config!(
+            "trusted_service {}: \"service\" is reserved for api=\"{}\"; \
+             reaching the service over ordinary IP is the only mode",
+            ts_id,
+            zpl::TS_API_ATTR_QUERY
+        ));
+    }
+
+    // url: required https URL with a host, no query or fragment; one trailing
+    // slash is normalised away (the visa service appends /query and /schema).
+    let mut url = ts
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if !is_https_url_with_host(&url) || url.contains('?') || url.contains('#') {
+        return Err(err_config!(
+            "trusted_service {}: url must be an https URL without query or fragment",
+            ts_id
+        ));
+    }
+    if let Some(stripped) = url.strip_suffix('/') {
+        url = stripped.to_string();
+    }
+
+    // ca_cert_path: optional path, captured verbatim. It is resolved relative
+    // to the .zplc and its PEM contents embedded by the weaver, the same
+    // split as the oidc seed_jwks.
+    let ca_cert_path = match ts.get("ca_cert_path") {
+        None => None,
+        Some(v) => Some(PathBuf::from(v.as_str().ok_or(err_config!(
+            "trusted_service {} ca_cert_path is not a string",
+            ts_id
+        ))?)),
+    };
+
+    // timeout_seconds: optional integer 1..=30, default 5.
+    let timeout_seconds = match ts.get("timeout_seconds") {
+        None => 5,
+        Some(v) => {
+            let t = v
+                .as_integer()
+                .filter(|t| (1..=30).contains(t))
+                .ok_or(err_config!(
+                    "trusted_service {}: timeout_seconds must be an integer in 1..=30",
+                    ts_id
+                ))?;
+            t as u32
+        }
+    };
+
+    // expiration_seconds: parsed by the caller; required and positive so
+    // returned attributes always have a policy-declared lifetime (the visa
+    // service enforces the 60-second floor at install time).
+    if expiration_seconds == 0 {
+        return Err(err_config!(
+            "trusted_service {}: expiration_seconds is required and must be positive for api=\"{}\"",
+            ts_id,
+            zpl::TS_API_ATTR_QUERY
+        ));
+    }
+
+    // returns_attributes: required, >= 1 mapping; the reserved-namespace check
+    // in parse_return_mappings applies (an attribute service is never the
+    // default).
+    let returns_raw = parse_string_array(ts, "returns_attributes", "trusted_service")?;
+    let returns_attrs = parse_return_mappings(ts_id, &returns_raw, false)?;
+    if returns_attrs.is_empty() {
+        return Err(err_config!(
+            "trusted_service {} with api \"{}\" requires at least one returns_attributes mapping",
+            ts_id,
+            zpl::TS_API_ATTR_QUERY
+        ));
+    }
+
+    Ok(TrustedService {
+        id: ts_id.to_string(),
+        api: zpl::TS_API_ATTR_QUERY.to_string(),
+        expiration_seconds,
+        returns_attrs,
+        attr_query: Some(AttrQueryTsConfig {
+            url,
+            ca_cert_path,
+            timeout_seconds,
+        }),
+        ..Default::default()
+    })
+}
+
 // Parse an individual trusted_service table.
 pub(super) fn parse_trusted_service(
     ts_id: &str,
@@ -517,6 +655,18 @@ pub(super) fn parse_trusted_service(
             ));
         }
         return parse_oidc_trusted_service(ts_id, ts, expiration_seconds, ctx);
+    }
+
+    if api == zpl::TS_API_ATTR_QUERY {
+        // Same id guard as oidc: the builtin default service must never be
+        // an attribute service.
+        if is_default || ts_id == zpl::DEFAULT_TRUSTED_SERVICE_ID {
+            return Err(err_config!(
+                "default trusted_service cannot have api \"{}\"",
+                zpl::TS_API_ATTR_QUERY
+            ));
+        }
+        return parse_attr_query_trusted_service(ts_id, ts, expiration_seconds);
     }
 
     let cert_path = if ts.contains_key("cert_path") {
@@ -610,6 +760,7 @@ pub(super) fn parse_trusted_service(
         client: client_svc,
         service: service_svc,
         oidc: None,
+        attr_query: None,
     })
 }
 
@@ -1242,5 +1393,268 @@ mod test {
                 .contains("default trusted_service cannot have api \"oidc\""),
             "{err}"
         );
+    }
+
+    // ---- zipline#76: api = "zpr-attr/1" attribute services ----
+
+    /// A minimal valid `api = "zpr-attr/1"` declaration (docs/ATTRIBUTE_SERVICE.md).
+    fn attr_query_minimal() -> String {
+        r#"
+            api = "zpr-attr/1"
+            url = "https://attrs.zipline.example/tenant-7"
+            expiration_seconds = 3600
+            returns_attributes = ["dept -> user.dept", "roles -> user.role{}", "contractor -> #user.contractor"]
+        "#
+        .to_string()
+    }
+
+    /// `attr_query_minimal` with the line containing `find` replaced by `repl`.
+    fn attr_query_with(find: &str, repl: &str) -> Table {
+        let src: String = attr_query_minimal()
+            .lines()
+            .map(|l| {
+                if l.trim_start().starts_with(find) {
+                    repl.to_string()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        body(&src)
+    }
+
+    #[test]
+    fn test_attr_query_minimal_accepted() {
+        let ts = parse_trusted_service(
+            "zipline",
+            &body(&attr_query_minimal()),
+            &CompilationCtx::default(),
+        )
+        .unwrap();
+        assert_eq!(ts.api, zpl::TS_API_ATTR_QUERY);
+        assert_eq!(ts.expiration_seconds, 3600);
+        assert!(ts.identity_attrs.is_empty(), "no identity attributes");
+        assert!(ts.provider.is_none());
+        assert!(ts.client.is_none());
+        assert!(ts.service.is_none());
+        assert!(ts.oidc.is_none());
+        let aq = ts.attr_query.as_ref().expect("attr_query config present");
+        assert_eq!(aq.url, "https://attrs.zipline.example/tenant-7");
+        assert_eq!(
+            aq.ca_cert_path, None,
+            "absent ca_cert_path means system roots"
+        );
+        assert_eq!(aq.timeout_seconds, 5, "default timeout");
+        // Ordered mappings with markers preserved.
+        let keys: Vec<&str> = ts
+            .returns_attrs
+            .iter()
+            .map(|m| m.service_attr_key.as_str())
+            .collect();
+        assert_eq!(keys, vec!["dept", "roles", "contractor"]);
+        assert_eq!(find(&ts, "roles").zpr_attr_spec, "user.role{}");
+        assert_eq!(find(&ts, "contractor").zpr_attr_spec, "#user.contractor");
+    }
+
+    #[test]
+    fn test_attr_query_url_trailing_slash_stripped() {
+        let t = attr_query_with("url =", "url = \"https://attrs.zipline.example/tenant-7/\"");
+        let ts = parse_trusted_service("zipline", &t, &CompilationCtx::default()).unwrap();
+        assert_eq!(
+            ts.attr_query.unwrap().url,
+            "https://attrs.zipline.example/tenant-7"
+        );
+    }
+
+    #[test]
+    fn test_attr_query_url_required_and_https() {
+        // Missing, non-https, host-less, query and fragment URLs all rejected.
+        for repl in [
+            "",
+            "url = \"http://attrs.zipline.example\"",
+            "url = \"https:///tenant-7\"",
+            "url = \"https://:443/tenant-7\"",
+            "url = \"https://user@/tenant-7\"",
+            "url = \"https://attrs.zipline.example:notaport/tenant-7\"",
+            "url = \"https://attrs.zipline.example/q?x=1\"",
+            "url = \"https://attrs.zipline.example/q#frag\"",
+        ] {
+            let t = attr_query_with("url =", repl);
+            let err = parse_trusted_service("zipline", &t, &CompilationCtx::default()).unwrap_err();
+            assert!(
+                err.to_string().contains(
+                    "trusted_service zipline: url must be an https URL without query or fragment"
+                ),
+                "url line {repl:?} gave: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_attr_query_ca_cert_path_embeds_pem() {
+        // The parser captures the path verbatim; resolution against the .zplc
+        // directory and PEM validation happen in the weaver (same split as the
+        // oidc seed_jwks).
+        let t = attr_query_with(
+            "api =",
+            "api = \"zpr-attr/1\"\nca_cert_path = \"zipline-ca.pem\"",
+        );
+        let ts = parse_trusted_service("zipline", &t, &CompilationCtx::default()).unwrap();
+        assert_eq!(
+            ts.attr_query.unwrap().ca_cert_path,
+            Some(PathBuf::from("zipline-ca.pem"))
+        );
+    }
+
+    #[test]
+    fn test_attr_query_timeout_range() {
+        // In-range values accepted...
+        for (val, want) in [("1", 1u32), ("30", 30u32)] {
+            let t = attr_query_with(
+                "api =",
+                &format!("api = \"zpr-attr/1\"\ntimeout_seconds = {val}"),
+            );
+            let ts = parse_trusted_service("zipline", &t, &CompilationCtx::default()).unwrap();
+            assert_eq!(ts.attr_query.unwrap().timeout_seconds, want);
+        }
+        // ...out-of-range and mistyped values rejected.
+        for val in ["0", "31", "-1", "\"5\"", "3.5", "true"] {
+            let t = attr_query_with(
+                "api =",
+                &format!("api = \"zpr-attr/1\"\ntimeout_seconds = {val}"),
+            );
+            let err = parse_trusted_service("zipline", &t, &CompilationCtx::default()).unwrap_err();
+            assert!(
+                err.to_string().contains(
+                    "trusted_service zipline: timeout_seconds must be an integer in 1..=30"
+                ),
+                "timeout {val:?} gave: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_attr_query_expiration_required_and_positive() {
+        for repl in ["", "expiration_seconds = 0"] {
+            let t = attr_query_with("expiration_seconds =", repl);
+            let err = parse_trusted_service("zipline", &t, &CompilationCtx::default()).unwrap_err();
+            assert!(
+                err.to_string().contains(
+                    "trusted_service zipline: expiration_seconds is required and must be positive for api=\"zpr-attr/1\""
+                ),
+                "expiration line {repl:?} gave: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_attr_query_returns_attributes_required() {
+        for repl in ["", "returns_attributes = []"] {
+            let t = attr_query_with("returns_attributes =", repl);
+            let err = parse_trusted_service("zipline", &t, &CompilationCtx::default()).unwrap_err();
+            assert!(
+                err.to_string().contains(
+                    "trusted_service zipline with api \"zpr-attr/1\" requires at least one returns_attributes mapping"
+                ),
+                "returns line {repl:?} gave: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_attr_query_reserved_namespace_rejected() {
+        // The reserved `zpr.` namespace check applies through parse_return_mappings.
+        let t = attr_query_with(
+            "returns_attributes =",
+            "returns_attributes = [\"cn -> device.zpr.adapter.cn\"]",
+        );
+        let err = parse_trusted_service("zipline", &t, &CompilationCtx::default()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("attribute 'device.zpr.adapter.cn' is reserved for ZPR"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_attr_query_forbidden_properties_rejected() {
+        for (line, prop) in [
+            ("identity_attributes = [\"dept\"]", "identity_attributes"),
+            ("provider = [[\"foo\", \"bar\"]]", "provider"),
+            ("client = \"c\"", "client"),
+            ("cert_path = \"x.pem\"", "cert_path"),
+            ("prefix = \"bar.hop\"", "prefix"),
+        ] {
+            let mut src = attr_query_minimal();
+            src.push_str(line);
+            src.push('\n');
+            let err = parse_trusted_service("zipline", &body(&src), &CompilationCtx::default())
+                .unwrap_err();
+            assert!(
+                err.to_string().contains(&format!(
+                    "trusted_service zipline with api \"zpr-attr/1\" does not allow property '{prop}'"
+                )),
+                "property line {line:?} gave: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_attr_query_service_reserved_rejected() {
+        let mut src = attr_query_minimal();
+        src.push_str("service = \"attrs-proxy\"\n");
+        let err =
+            parse_trusted_service("zipline", &body(&src), &CompilationCtx::default()).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "trusted_service zipline: \"service\" is reserved for api=\"zpr-attr/1\""
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_attr_query_on_default_rejected() {
+        let err = parse_trusted_service(
+            "default",
+            &body(&attr_query_minimal()),
+            &CompilationCtx::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("default trusted_service cannot have api \"zpr-attr/1\""),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_attr_query_only_keys_unknown_for_other_apis() {
+        // The three new property names must stay unknown outside
+        // api = "zpr-attr/1": a stray `url` on a file service still trips the
+        // unknown-property warning (fatal under --werror).
+        for prop in [
+            "url = \"https://x.example\"",
+            "ca_cert_path = \"ca.pem\"",
+            "timeout_seconds = 5",
+        ] {
+            let t = body(&format!(
+                "api = \"file\"\n{prop}\nreturns_attributes = [\"color -> user.color\"]\n"
+            ));
+            let err = parse_trusted_service("attrfile", &t, &CompilationCtx::new(false, true))
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("unknown property"),
+                "property {prop:?} gave: {err}"
+            );
+        }
+        // And the attr-query parser accepts its own properties (no warning).
+        parse_trusted_service(
+            "zipline",
+            &body(&attr_query_minimal()),
+            &CompilationCtx::new(false, true),
+        )
+        .unwrap();
     }
 }

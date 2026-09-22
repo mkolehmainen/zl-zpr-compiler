@@ -1,0 +1,40 @@
+# oidc + zpr-attr/1 trusted-service interplay (zipline#76). An off-net OIDC
+# identity vendor plus a networked attribute service keyed on its identity
+# attribute (user.sub). No policy statement references google's returned
+# attributes; the identity-vendor rule must retain it anyway. The attribute
+# service pins a CA certificate whose PEM contents are embedded in the policy.
+
+[nodes.n0]
+provider = [["device.zpr.adapter.cn", "node.zpr.org"]]
+zpr_address = "fd5a:5052:90de::1"
+
+[trusted_services.zipline]
+api = "zpr-attr/1"
+url = "https://attrs.zipline.example/tenant-7/"
+ca_cert_path = "ca-cert.pem"
+timeout_seconds = 10
+expiration_seconds = 3600
+returns_attributes = [
+  "dept -> user.dept",
+  "roles -> user.role{}",
+  "contractor -> #user.contractor",
+]
+
+[trusted_services.google]
+api = "oidc"
+issuer = "https://accounts.google.com"
+jwks_uri = "https://www.googleapis.com/oauth2/v3/certs"
+client_id = "1234567890-abcdef.apps.googleusercontent.com"
+allowed_domains = ["*"]
+expiration_seconds = 3600
+returns_attributes = ["sub -> user.sub", "email -> user.email"]
+identity_attributes = ["sub"]
+
+[protocols.http]
+l4protocol = "TCP"
+port = 80
+
+[services.Web]
+protocol = "http"
+port = 80
+provider = [["device.zpr.adapter.cn", "web.zpr.org"]]

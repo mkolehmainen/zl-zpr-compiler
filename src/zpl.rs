@@ -23,6 +23,9 @@ pub const TS_API_V1: &str = "validation/1";
 pub const TS_API_V2: &str = "validation/2";
 pub const TS_API_FILE: &str = "file";
 pub const TS_API_OIDC: &str = "oidc";
+/// Networked attribute service speaking the `zpr-attr/1` wire API
+/// (docs/ATTRIBUTE_SERVICE.md). Versioned name: leaves room for `zpr-attr/2`.
+pub const TS_API_ATTR_QUERY: &str = "zpr-attr/1";
 
 pub const ICMP_INTERACION_REQUEST_RESPONSE: &str = "request-response";
 pub const ICMP_INTERACTION_ONESHOT: &str = "oneshot";

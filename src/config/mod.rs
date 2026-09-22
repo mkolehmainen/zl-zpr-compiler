@@ -159,6 +159,24 @@ pub struct TrustedService {
     /// tests consume it, so it is exempted from dead-code analysis.
     #[allow(dead_code)]
     pub oidc: Option<OidcTsConfig>,
+    /// Set when `api = "zpr-attr/1"` (docs/ATTRIBUTE_SERVICE.md). The weaver
+    /// copies it into the binary policy's `AttrQueryConfig` record.
+    pub attr_query: Option<AttrQueryTsConfig>,
+}
+
+/// The `api = "zpr-attr/1"` properties of a trusted service
+/// (docs/ATTRIBUTE_SERVICE.md, "Declaring an attribute service in policy").
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AttrQueryTsConfig {
+    /// https base URL, trailing slash stripped; the visa service appends
+    /// `/query` and `/schema`.
+    pub url: String,
+    /// Optional CA pin, resolved relative to the `.zplc` (like the oidc
+    /// `seed_jwks`); the weaver reads and embeds the PEM contents so the pin
+    /// is signed with the policy. `None` means system roots.
+    pub ca_cert_path: Option<PathBuf>,
+    /// Whole-request timeout the visa service applies; 1..=30, default 5.
+    pub timeout_seconds: u32,
 }
 
 /// The `api = "oidc"` properties of a trusted service (see spec-OIDC.md "ZPLC configuration").
@@ -539,6 +557,7 @@ impl ConfigParse {
                 client: None,
                 service: None,
                 oidc: None,
+                attr_query: None,
             };
             trusted_services.push(ts);
         }

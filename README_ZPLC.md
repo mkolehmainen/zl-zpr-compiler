@@ -141,6 +141,8 @@ For non default trusted services, the field meanings are:
   * `oidc` - An OpenID Connect identity provider (e.g. Google). The adapter talks to the
      provider directly; the visa service only needs the provider's JWKS to verify tokens.
      See *OIDC Trusted Services* below.
+  * `zpr-attr/1` - A networked attribute service the visa service queries over HTTPS.
+     See *Attribute Services (zpr-attr/1)* below.
   * *addition values TBD*
 * `service` - Sets the service ID used in the **services** block for the visa-service
   facing service provided by this trusted service.  This is *optional* and by default
@@ -155,8 +157,8 @@ For non default trusted services, the field meanings are:
 * `identity_attributes` - Subset of the `returns_attributes` that denote identity.
 * `provider` - Attribute key/value tuples of the actor (or actors) that provide this service.
 * `expiration_seconds` - Optional lifetime (in seconds) of the attributes this service vouches
-  for. Accepted on `validation/2`, `file`, and `oidc` services (required and positive for
-  `oidc`); rejected on `default`. Must be a
+  for. Accepted on `validation/2`, `file`, `oidc`, and `zpr-attr/1` services (required and
+  positive for `oidc` and `zpr-attr/1`); rejected on `default`. Must be a
   non-negative integer that fits in a 32-bit unsigned value. Omitted or `0` means the visa
   service selects the lifetime at runtime (from the service or its own default).
 
@@ -272,6 +274,57 @@ Because the adapter talks to the provider directly and TLS to the provider is ve
 against system roots, the `client`, `provider`, `cert_path`, and `prefix` properties are
 **not** allowed on an `oidc` trusted service. The `default` trusted service cannot use
 `api = "oidc"`.
+
+### Attribute Services (zpr-attr/1)
+
+A `zpr-attr/1` trusted service declares a networked attribute service: an HTTPS API the
+visa service queries for actor attributes, keyed on identities vended by other trusted
+services (the same decorating-store role as `api = "file"`, but over the network). The
+wire protocol is specified in `zl-zpr-dev-context/docs/ATTRIBUTE_SERVICE.md`.
+
+```toml
+[trusted_services.zipline]
+api = "zpr-attr/1"
+url = "https://attrs.zipline.example/tenant-7"    # base of the API; https required
+ca_cert_path = "zipline-ca.pem"                   # optional: PEM, embedded in the policy
+timeout_seconds = 5                               # optional: 1..=30, default 5
+expiration_seconds = 3600                         # required: how long returned attributes live
+returns_attributes = [
+  "dept -> user.dept",             # single-valued
+  "roles -> user.role{}",          # multi-valued
+  "contractor -> #user.contractor" # tag
+]
+```
+
+Properties:
+
+* `url` - **Required.** The base URL of the service's API. Must be `https://` with a
+  host and no query string or fragment. It may carry a path prefix; the visa service
+  appends `/query` and `/schema`. A trailing slash is normalised away.
+* `ca_cert_path` - Optional path, relative to the `.zplc` file, of a PEM file holding
+  one or more `CERTIFICATE` blocks. Its **contents** are embedded in the compiled
+  policy, so the pin is signed along with everything else. When present it is
+  **exclusive**: the visa service trusts only these roots for this service and disables
+  the built-in system roots. Absent means system roots.
+* `timeout_seconds` - Optional whole-request timeout the visa service applies to every
+  call. An integer from 1 to 30; defaults to 5.
+* `expiration_seconds` - **Required** and must be positive: the default lifetime of
+  every attribute returned, and the ceiling on any lifetime the service asks for. The
+  visa service enforces a 60-second floor at runtime.
+* `returns_attributes` - **Required**, at least one mapping, using the same `->` syntax
+  as any other trusted service. The `zpr.` sub-namespace remains reserved.
+
+An attribute service is a decorating store keyed on other services' identities, so
+`identity_attributes` is **not** allowed (the same rule as `api = "file"`). The
+BAS-era `provider`, `client`, `cert_path`, and `prefix` properties are not allowed
+either. **`service` is reserved**: it will one day name a ZPR service through which the
+visa service reaches an on-net attribute service; in `zpr-attr/1` it is rejected, and
+reaching the service over ordinary IP is the only mode. The `default` trusted service
+cannot use `api = "zpr-attr/1"`.
+
+Like a `file` service, an attribute service is woven with no endpoints and no
+communication policy, is retained when a policy statement references one of its
+attributes, and is pruned otherwise.
 
 ### Attributes
 

@@ -9,7 +9,9 @@ use std::net::IpAddr;
 use crate::errors::CompilationError;
 use crate::protocols::{PortSpec, Protocol};
 use crate::ptypes::Signal;
-use zpr::policy_types::{AttrMapping, Attribute, OidcConfig, ServiceType, TrustedService};
+use zpr::policy_types::{
+    AttrMapping, AttrQueryConfig, Attribute, OidcConfig, ServiceType, TrustedService,
+};
 
 /// A service oriented view of the network.
 #[derive(Debug, Clone, Default)]
@@ -49,6 +51,8 @@ pub struct TrustedServiceSpec {
     pub expiration_seconds: u32,
     /// Pinned provider configuration, set only when `api = "oidc"`.
     pub oidc: Option<OidcConfig>,
+    /// Pinned attribute-service configuration, set only when `api = "zpr-attr/1"`.
+    pub attr_query: Option<AttrQueryConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -297,6 +301,7 @@ impl Fabric {
                 returns_attrs: spec.returns_attrs,
                 identity_attrs: spec.identity_attrs,
                 oidc: spec.oidc,
+                attr_query: spec.attr_query,
             }),
         };
         self.services.push(fs);
