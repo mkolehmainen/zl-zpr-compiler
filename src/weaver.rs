@@ -1413,6 +1413,7 @@ impl Weaver {
                     identity_attrs: ts_identity_attrs,
                     expiration_seconds,
                     oidc: None,
+                    attr_query: None,
                 })
                 .map_err(|e| {
                     CompilationError::ConfigError(format!("error adding trusted service: {}", e))
