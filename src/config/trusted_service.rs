@@ -209,13 +209,23 @@ fn parse_file_trusted_service(
 }
 
 /// True when `s` is an `https://` URL with a non-empty host component.
-/// Deliberately minimal (no new dependency): scheme prefix plus a non-empty
-/// authority ahead of any path — enough to reject `https://` / `https:///path`
-/// while leaving full well-formedness to the eventual HTTP client.
+/// Parses with the `url` crate (already in the dependency tree via `zpr`)
+/// rather than substring checks, so malformed authorities such as
+/// `https://:443/x` or `https://user@/x` — nonempty authority, no usable
+/// host — are rejected here instead of at visa-service query time. One
+/// extra guard: the WHATWG parser collapses `https:///x` to host `x`, but
+/// an empty authority is far more likely a missing host than a real URL,
+/// so that spelling stays rejected.
 fn is_https_url_with_host(s: &str) -> bool {
-    match s.strip_prefix("https://") {
-        None => false,
-        Some(rest) => !rest.split('/').next().unwrap_or_default().is_empty(),
+    if !s
+        .strip_prefix("https://")
+        .is_some_and(|rest| !rest.starts_with('/'))
+    {
+        return false;
+    }
+    match url::Url::parse(s) {
+        Ok(u) => u.scheme() == "https" && u.host_str().is_some_and(|h| !h.is_empty()),
+        Err(_) => false,
     }
 }
 
@@ -1464,6 +1474,9 @@ mod test {
             "",
             "url = \"http://attrs.zipline.example\"",
             "url = \"https:///tenant-7\"",
+            "url = \"https://:443/tenant-7\"",
+            "url = \"https://user@/tenant-7\"",
+            "url = \"https://attrs.zipline.example:notaport/tenant-7\"",
             "url = \"https://attrs.zipline.example/q?x=1\"",
             "url = \"https://attrs.zipline.example/q#frag\"",
         ] {
