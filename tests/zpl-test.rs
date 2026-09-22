@@ -1318,6 +1318,19 @@ fn test_attr_query_service_reserved_rejected() {
 }
 
 #[test]
+fn test_attr_query_truncated_ca_pem_rejected() {
+    // (PR #8 review) A ca_cert_path whose file carries the CERTIFICATE marker
+    // but a truncated body must fail compilation, not break the visa service's
+    // trust store at runtime.
+    let temp = TempDir::new("attr-query-bad-ca-pem");
+    let msg = compile_expect_err("bad-attr-query-ca-pem", &temp);
+    assert!(
+        msg.contains("no valid certificate"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
 fn test_oidc_proxy_provider_trusted_service_dependency_woven() {
     // (zipline#6 review) The JWKS proxy's provider attributes may resolve through
     // a trusted service used nowhere else (`attrfile` via device.color). That

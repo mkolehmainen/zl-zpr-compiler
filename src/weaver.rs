@@ -1683,9 +1683,11 @@ impl Weaver {
             ))
         })?;
 
-        // CA pin: read relative to the .zplc directory, require at least one
-        // CERTIFICATE block, and embed the PEM contents verbatim so the pin is
-        // signed with the policy. "" on the wire means system roots.
+        // CA pin: read relative to the .zplc directory, parse the complete PEM
+        // bundle requiring at least one valid certificate (PR #8 review: a
+        // marker-only check let truncated PEM through to break the VS trust
+        // store at runtime), then embed the PEM contents verbatim so the pin
+        // is signed with the policy. "" on the wire means system roots.
         let ca_cert_pem = match &aq_cfg.ca_cert_path {
             Some(path) => {
                 let abs_path = config.resolve_config_path(path);
@@ -1695,9 +1697,16 @@ impl Weaver {
                         path.display()
                     ))
                 })?;
-                if !contents.contains("-----BEGIN CERTIFICATE-----") {
+                let certs = openssl::x509::X509::stack_from_pem(contents.as_bytes())
+                    .map_err(|e| {
+                        CompilationError::ConfigError(format!(
+                            "trusted_service {ts_name}: ca_cert_path \"{}\" contains no valid certificate: {e}",
+                            path.display()
+                        ))
+                    })?;
+                if certs.is_empty() {
                     return Err(CompilationError::ConfigError(format!(
-                        "trusted_service {ts_name}: ca_cert_path \"{}\" contains no CERTIFICATE block",
+                        "trusted_service {ts_name}: ca_cert_path \"{}\" contains no valid certificate",
                         path.display()
                     )));
                 }
