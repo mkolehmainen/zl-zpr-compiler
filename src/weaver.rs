@@ -3,7 +3,9 @@
 use base64::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv6Addr;
-use zpr::policy_types::{AttrDomain, AttrMapping, Attribute, OidcConfig, ServiceType};
+use zpr::policy_types::{
+    AttrDomain, AttrMapping, AttrQueryConfig, Attribute, OidcConfig, ServiceType,
+};
 
 use crate::compilation::Compilation;
 use crate::config_api::{ConfigApi, ConfigItem};
@@ -1197,11 +1199,15 @@ impl Weaver {
 
                 // A `file` service is offered by the Visa Service itself and has no provider
                 // attributes to resolve. An `oidc` provider is off-net; the VS is likewise
-                // its sole (implicit) provider.
+                // its sole (implicit) provider. A `zpr-attr/1` attribute service is off-net
+                // too, reached over ordinary IP (its `service` property is reserved).
                 let ts_api = config
                     .must_get(&format!("/trusted_services/{ts_name}/api"))
                     .to_string();
-                if ts_api == zpl::TS_API_FILE || ts_api == zpl::TS_API_OIDC {
+                if ts_api == zpl::TS_API_FILE
+                    || ts_api == zpl::TS_API_OIDC
+                    || ts_api == zpl::TS_API_ATTR_QUERY
+                {
                     // An oidc declaration may name an on-net JWKS proxy in
                     // `service`; that service's provider attributes take part in
                     // the dependency closure like any other provider attributes,
@@ -1349,6 +1355,19 @@ impl Weaver {
             // and may name an on-net JWKS proxy service to weave a rule for.
             if ts_api == zpl::TS_API_OIDC {
                 self.add_oidc_trusted_service(
+                    config,
+                    &ts_name,
+                    ts_returns_attrs,
+                    expiration_seconds,
+                )?;
+                continue;
+            }
+
+            // A `zpr-attr/1` attribute service is off-net too (reached over
+            // ordinary IP; `service` is reserved), so it takes the same
+            // early-out shape and carries an AttrQueryConfig.
+            if ts_api == zpl::TS_API_ATTR_QUERY {
+                self.add_attr_query_trusted_service(
                     config,
                     &ts_name,
                     ts_returns_attrs,
@@ -1624,6 +1643,92 @@ impl Weaver {
                 &pline,
             )?;
         }
+        Ok(())
+    }
+
+    /// Weave an `api = "zpr-attr/1"` trusted service (zipline#76).
+    ///
+    /// The attribute service is off-net (reached over ordinary IP; `service`
+    /// is reserved), so the woven service has the file-style shape: the VS
+    /// `cn == vs.zpr` as sole provider attribute, no protocol, and an
+    /// `AttrQueryConfig` carrying the pinned service configuration. A stray
+    /// conventionally-named [services.*] block is rejected as for oidc.
+    fn add_attr_query_trusted_service(
+        &mut self,
+        config: &ConfigApi,
+        ts_name: &str,
+        ts_returns_attrs: Vec<AttrMapping>,
+        expiration_seconds: u32,
+    ) -> Result<(), CompilationError> {
+        // An attribute service has no on-net service on either side, so a
+        // conventionally-named [services.<id>*] block is a leftover from a
+        // validation/2-style setup. Fail loudly.
+        for name in [
+            ts_name.to_string(),
+            format!("{ts_name}-vs"),
+            format!("{ts_name}-client"),
+        ] {
+            if config.get(&format!("/services/{name}")).is_some() {
+                return Err(CompilationError::ConfigError(format!(
+                    "trusted_service {ts_name}: api=\"{}\" has no on-net service; remove [services.{name}]",
+                    zpl::TS_API_ATTR_QUERY
+                )));
+            }
+        }
+
+        let aq_cfg = config.get_attr_query_ts_config(ts_name).ok_or_else(|| {
+            CompilationError::ConfigError(format!(
+                "trusted_service {ts_name}: api=\"{}\" but no attr_query configuration",
+                zpl::TS_API_ATTR_QUERY
+            ))
+        })?;
+
+        // CA pin: read relative to the .zplc directory, require at least one
+        // CERTIFICATE block, and embed the PEM contents verbatim so the pin is
+        // signed with the policy. "" on the wire means system roots.
+        let ca_cert_pem = match &aq_cfg.ca_cert_path {
+            Some(path) => {
+                let abs_path = config.resolve_config_path(path);
+                let contents = std::fs::read_to_string(&abs_path).map_err(|e| {
+                    CompilationError::ConfigError(format!(
+                        "trusted_service {ts_name}: failed to read ca_cert_path \"{}\": {e}",
+                        path.display()
+                    ))
+                })?;
+                if !contents.contains("-----BEGIN CERTIFICATE-----") {
+                    return Err(CompilationError::ConfigError(format!(
+                        "trusted_service {ts_name}: ca_cert_path \"{}\" contains no CERTIFICATE block",
+                        path.display()
+                    )));
+                }
+                Some(contents)
+            }
+            None => None,
+        };
+
+        let attr_query = AttrQueryConfig {
+            url: aq_cfg.url.clone(),
+            ca_cert_pem,
+            timeout_seconds: aq_cfg.timeout_seconds,
+        };
+
+        let vs_cn_attr = Attribute::tuple(zpl::KATTR_CN)
+            .single()
+            .value(zpl::VISA_SERVICE_CN)
+            .build()?;
+        self.fabric
+            .add_trusted_service(TrustedServiceSpec {
+                id: ts_name.to_string(),
+                api: zpl::TS_API_ATTR_QUERY.to_string(),
+                provider_attrs: vec![vs_cn_attr],
+                returns_attrs: ts_returns_attrs,
+                expiration_seconds,
+                attr_query: Some(attr_query),
+                ..Default::default()
+            })
+            .map_err(|e| {
+                CompilationError::ConfigError(format!("error adding trusted service: {}", e))
+            })?;
         Ok(())
     }
 

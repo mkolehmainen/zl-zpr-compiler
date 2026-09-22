@@ -338,6 +338,22 @@ pub fn dump_v2(fname: &str, encoded_buf: Bytes) {
                             format!("{} keys", seed_keys).yellow()
                         );
                     }
+                    // The pinned attribute-service configuration (api = "zpr-attr/1"
+                    // only). The CA pin's PEM body is never printed, only its size.
+                    if let Some(aq) = &ts.attr_query {
+                        println!("            url: {}", aq.url.yellow());
+                        println!(
+                            "    ca_cert_pem: {}",
+                            match &aq.ca_cert_pem {
+                                Some(pem) => format!("<{} bytes>", pem.len()).yellow(),
+                                None => "(none: system roots)".yellow().dimmed(),
+                            }
+                        );
+                        println!(
+                            "        timeout: {}",
+                            format!("{}s", aq.timeout_seconds).yellow()
+                        );
+                    }
                 }
                 Err(e) => {
                     println!(

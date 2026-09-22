@@ -657,6 +657,18 @@ impl ConfigApi {
             .as_ref()
     }
 
+    /// Direct accessor for the parsed `api = "zpr-attr/1"` configuration of a
+    /// trusted service, exposed the same way (and for the same reason) as
+    /// [`Self::get_oidc_ts_config`].
+    pub fn get_attr_query_ts_config(&self, ts_id: &str) -> Option<&config::AttrQueryTsConfig> {
+        self.config
+            .trusted_services
+            .iter()
+            .find(|ts| ts.id == ts_id)?
+            .attr_query
+            .as_ref()
+    }
+
     /// `key_path` here is everything after "zpr/visa_services"
     ///
     /// Note that `dock_node_id` may return None if not set in config.

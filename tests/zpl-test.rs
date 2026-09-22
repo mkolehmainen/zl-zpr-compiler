@@ -1176,6 +1176,147 @@ fn test_oidc_ceiling_below_expiration_rejected() {
     );
 }
 
+// ---- zipline#76: `api = "zpr-attr/1"` attribute services — end-to-end + error paths ----
+
+#[test]
+fn test_attr_query_end_to_end() {
+    // The oidc-file-interplay pattern with the file store replaced by a
+    // zpr-attr/1 attribute service: `google` (oidc, vends identity attribute
+    // `sub`) is retained by the identity-vendor rule; `zipline` is retained by
+    // the ordinary attribute reference and carries an AttrQueryConfig.
+    let temp = TempDir::new("attr-query-e2e");
+    let pbytes = compile_policy_bytes("test-attr-query", &temp);
+    let rdr = capnp::serialize::read_message(
+        &mut Cursor::new(pbytes.as_slice()),
+        capnp::message::ReaderOptions::new(),
+    )
+    .unwrap();
+    let policy = rdr.get_root::<policy_capnp::policy::Reader>().unwrap();
+
+    assert!(
+        policy.has_trusted_services(),
+        "policy must have trustedServices"
+    );
+    let records = decode_records(&policy);
+    let ids: Vec<&str> = records.iter().map(|r| r.service_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["google", "zipline"],
+        "both the identity vendor and the attribute service must be woven"
+    );
+
+    // google: retained by the identity-vendor rule, with its OidcConfig intact.
+    let google = records.iter().find(|r| r.service_id == "google").unwrap();
+    assert_eq!(google.identity_attrs, vec!["sub".to_string()]);
+    assert!(google.attr_query.is_none());
+
+    // zipline: the attribute service record.
+    let zipline = records.iter().find(|r| r.service_id == "zipline").unwrap();
+    assert_eq!(zipline.expiration_seconds, 3600);
+    assert!(
+        zipline.identity_attrs.is_empty(),
+        "an attribute service declares no identity attributes"
+    );
+    assert!(zipline.oidc.is_none());
+    assert_eq!(
+        mappings(zipline),
+        vec![
+            ("dept", "user.dept"),
+            ("roles", "user.role{}"),
+            ("contractor", "#user.contractor"),
+        ]
+    );
+    let aq = zipline
+        .attr_query
+        .as_ref()
+        .expect("zipline must carry AttrQueryConfig");
+    assert_eq!(
+        aq.url, "https://attrs.zipline.example/tenant-7",
+        "trailing slash must be stripped"
+    );
+    assert_eq!(aq.timeout_seconds, 10);
+    // The CA pin is the embedded PEM contents of test-data/ca-cert.pem, not the path.
+    let pem = aq.ca_cert_pem.as_ref().expect("CA pin embedded");
+    assert!(
+        pem.contains("-----BEGIN CERTIFICATE-----"),
+        "embedded pin must be PEM contents"
+    );
+    let expected_pem = std::fs::read_to_string(get_zpl_dir().join("ca-cert.pem")).unwrap();
+    assert_eq!(pem, &expected_pem, "PEM embedded verbatim");
+
+    // zipline join Service: Trusted("zpr-attr/1") with zero endpoints
+    // (file-style shape: the VS itself is the provider).
+    assert_eq!(
+        trusted_service_endpoint_count(&policy, "zipline", "zpr-attr/1"),
+        0,
+        "attribute service must have zero endpoints"
+    );
+}
+
+#[test]
+fn test_attr_query_unreferenced_pruned() {
+    // No policy statement references the attribute service's attributes and it
+    // vends no identity attributes, so the weaver must prune it: no
+    // trustedServices record and no join Service.
+    let temp = TempDir::new("attr-query-pruned");
+    let pbytes = compile_policy_bytes("test-attr-query-pruned", &temp);
+    let rdr = capnp::serialize::read_message(
+        &mut Cursor::new(pbytes.as_slice()),
+        capnp::message::ReaderOptions::new(),
+    )
+    .unwrap();
+    let policy = rdr.get_root::<policy_capnp::policy::Reader>().unwrap();
+
+    let records = decode_records(&policy);
+    assert!(
+        !records.iter().any(|r| r.service_id == "zipline"),
+        "unreferenced attribute service must be pruned, got records: {:?}",
+        records.iter().map(|r| &r.service_id).collect::<Vec<_>>()
+    );
+    for jp in policy.get_join_policies().unwrap().iter() {
+        if let Ok(provides) = jp.get_provides() {
+            assert!(
+                !provides
+                    .iter()
+                    .any(|s| s.get_id().unwrap().to_str().unwrap() == "zipline"),
+                "pruned attribute service must not appear as a join Service"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_attr_query_http_url_rejected() {
+    let temp = TempDir::new("attr-query-http-url");
+    let msg = compile_expect_err("bad-attr-query-http-url", &temp);
+    assert!(
+        msg.contains("trusted_service zipline: url must be an https URL without query or fragment"),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn test_attr_query_identity_attrs_rejected() {
+    let temp = TempDir::new("attr-query-identity-attrs");
+    let msg = compile_expect_err("bad-attr-query-identity-attrs", &temp);
+    assert!(
+        msg.contains(
+            "trusted_service zipline with api \"zpr-attr/1\" does not allow property 'identity_attributes'"
+        ),
+        "unexpected error: {msg}"
+    );
+}
+
+#[test]
+fn test_attr_query_service_reserved_rejected() {
+    let temp = TempDir::new("attr-query-service-reserved");
+    let msg = compile_expect_err("bad-attr-query-service-reserved", &temp);
+    assert!(
+        msg.contains("trusted_service zipline: \"service\" is reserved for api=\"zpr-attr/1\""),
+        "unexpected error: {msg}"
+    );
+}
+
 #[test]
 fn test_oidc_proxy_provider_trusted_service_dependency_woven() {
     // (zipline#6 review) The JWKS proxy's provider attributes may resolve through

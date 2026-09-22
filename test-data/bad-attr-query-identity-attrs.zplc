@@ -1,0 +1,22 @@
+# Deliberately failing: identity_attributes is not allowed on zpr-attr/1
+# (a decorating store is keyed on other services' identities).
+
+[nodes.n0]
+provider = [["device.zpr.adapter.cn", "node.zpr.org"]]
+zpr_address = "fd5a:5052:90de::1"
+
+[trusted_services.zipline]
+api = "zpr-attr/1"
+url = "https://attrs.zipline.example/tenant-7"
+expiration_seconds = 3600
+returns_attributes = ["contractor -> #user.contractor"]
+identity_attributes = ["contractor"]
+
+[protocols.http]
+l4protocol = "TCP"
+port = 80
+
+[services.Web]
+protocol = "http"
+port = 80
+provider = [["device.zpr.adapter.cn", "web.zpr.org"]]
