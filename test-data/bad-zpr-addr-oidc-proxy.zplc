@@ -1,0 +1,44 @@
+# Deliberately-failing fixture (zipline#109): an oidc JWKS proxy service
+# provider carrying an authored ["zpr.addr", ...] pin must fail to compile
+# (zipline#106). Named bad-* so the must-compile sweeps skip it. Copy of
+# test-oidc-proxy-provider-ts.zplc plus the pin.
+
+[nodes.n0]
+provider = [["device.zpr.adapter.cn", "node.zpr.org"]]
+zpr_address = "fd5a:5052:90de::1"
+
+[trusted_services.attrfile]
+api = "file"
+returns_attributes = ["color -> device.color"]
+expiration_seconds = 3600
+
+[trusted_services.google]
+api             = "oidc"
+issuer          = "https://accounts.google.com"
+jwks_uri        = "https://www.googleapis.com/oauth2/v3/certs"
+client_id       = "1234567890-abcdef.apps.googleusercontent.com"
+allowed_domains = ["example.com"]
+seed_jwks       = "google-jwks-seed.json"
+service         = "google-jwks-proxy"
+expiration_seconds = 43200
+returns_attributes = ["sub -> user.oidc-subject", "hd -> user.domain"]
+identity_attributes = ["sub"]
+
+[protocols.http]
+l4protocol = "TCP"
+port = 80
+
+[protocols.tcp]
+l4protocol = "TCP"
+port = 3128
+
+# The proxy's provider is selected by an attribute only `attrfile` vouches for.
+[services.google-jwks-proxy]
+protocol = "tcp"
+port = 3128
+provider = [["device.color", "blue"], ["zpr.addr", "fd5a:5052:8888::31:28"]]
+
+[services.Webby]
+protocol = "http"
+port = 80
+provider = [["device.zpr.adapter.cn", "webby.zpr.org"]]

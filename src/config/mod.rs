@@ -674,10 +674,28 @@ pub(super) fn parse_provider(
     ctx: &str,
     table: &Table,
 ) -> Result<Vec<(String, String)>, CompilationError> {
-    match parse_attribute_tuples(ctx, table, "provider")? {
-        Some(attrs) => Ok(attrs),
-        None => Err(err_config!("{} missing provider", ctx)),
+    let attrs = match parse_attribute_tuples(ctx, table, "provider")? {
+        Some(attrs) => attrs,
+        None => return Err(err_config!("{} missing provider", ctx)),
+    };
+    // zipline#109 (review round 1): reject an authored `zpr.addr` pin eagerly,
+    // while parsing every provider list. The weaving-time check in
+    // `vec_to_attributes` only fires for services the ZPL actually references,
+    // so on its own it misses a pin in an unreferenced service's provider —
+    // and the documented contract is a compile error anywhere in a `.zplc`.
+    // This is the choke point every provider list goes through (nodes,
+    // services, trusted services).
+    for (k, _) in &attrs {
+        if k == zpl::KATTR_ADDR {
+            return Err(err_config!(
+                "{}: `{}` cannot be set in policy; grant a static adapter address with a \
+                 trusted service that returns `device.zpr_addr` (see README_ZPLC.md)",
+                ctx,
+                zpl::KATTR_ADDR
+            ));
+        }
     }
+    Ok(attrs)
 }
 
 fn tuples_to_tuple_str_vec(

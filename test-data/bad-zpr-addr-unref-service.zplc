@@ -1,0 +1,28 @@
+# Companion config for bad-zpr-addr-unref-service.zpl (zipline#109 review
+# round 1). The referenced service `web` is clean; the ["zpr.addr", ...] pin is
+# in `orphan`, which no ZPL statement references, so weaving never reaches it.
+# The pin must still be a compile error, caught at config parse time.
+
+[nodes.n0]
+provider = [["device.zpr.adapter.cn", "node.zpr.org"]]
+zpr_address = "fd5a:5052:90de::1"
+
+[trusted_services.attrfile]
+api = "file"
+returns_attributes = ["redhead -> #user.redhead"]
+expiration_seconds = 3600
+
+[protocols.http]
+l4protocol = "TCP"
+port = 80
+
+[services.web]
+protocol = "http"
+port = "80"
+provider = [["device.zpr.adapter.cn", "web.org"]]
+
+# Never referenced by the ZPL: the pin below is invisible to weaving.
+[services.orphan]
+protocol = "http"
+port = "8080"
+provider = [["device.zpr.adapter.cn", "orphan.org"], ["zpr.addr", "fd5a:5052:8888::80"]]

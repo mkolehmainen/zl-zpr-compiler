@@ -569,14 +569,13 @@ impl Weaver {
                     self.wctx
                         .add_used_trusted_service(zpl::DEFAULT_TRUSTED_SERVICE_ID);
                 }
-                // zpr.addr is a compiler-internal attribute vouched for by the default
-                // trusted service, not something an external service reports.
-                // See https://github.com/org-zpr/zpr-compiler/issues/133
-                zpl::KATTR_ADDR => {
-                    resolved_attrs.push(zpl_attr.clone());
-                    self.wctx
-                        .add_used_trusted_service(zpl::DEFAULT_TRUSTED_SERVICE_ID);
-                }
+                // Note there is deliberately no arm for zpl::KATTR_ADDR here
+                // (zipline#109): an authored `zpr.addr` provider pin is rejected
+                // in vec_to_attributes before resolution, and the node emitter
+                // (init_nodes) constructs the node's `zpr.addr` attribute AFTER
+                // its provider attributes are resolved, so the key never reaches
+                // this function. An unexpected occurrence falls through to the
+                // "not found in any trusted service" rejection below.
                 // The authority presence markers are installed by the visa
                 // service when a live authentication exists for that namespace
                 // (issue #144) -- they are not attributes an external trusted
@@ -2293,9 +2292,11 @@ mod test {
     }
 
     #[test]
-    fn test_resolve_attributes_allows_zpr_addr() {
-        // zpr.addr is a compiler-internal attribute; it should resolve without
-        // appearing in any trusted service's returns_attributes.
+    fn test_resolve_attributes_rejects_zpr_addr() {
+        // zipline#109: zpr.addr is no longer resolvable as a provider attribute.
+        // Only the node emitter (init_nodes) constructs it, AFTER resolution, from
+        // the node's zpr_address; nothing authored reaches resolve_attributes with
+        // it, and if something does it must fail like any other unvouched attribute.
         let cfg = r#"
         [nodes.n0]
         zpr_address = "fd5a:5052:90de::1"
@@ -2315,15 +2316,12 @@ mod test {
         let addr = Attribute::try_zpr_internal_attr(zpl::KATTR_ADDR, "fd5a:5052:8888::8")
             .expect("failed to build zpr.addr attribute");
 
-        let resolved = w
+        let err = w
             .resolve_attributes(&[addr], &config)
-            .expect("zpr.addr should resolve");
-        assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].zpl_key(), zpl::KATTR_ADDR);
+            .expect_err("zpr.addr must not resolve through any trusted service");
         assert!(
-            w.wctx
-                .used_trusted_services
-                .contains(zpl::DEFAULT_TRUSTED_SERVICE_ID)
+            err.to_string().contains("not found in any trusted service"),
+            "unexpected error: {err}"
         );
     }
 

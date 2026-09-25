@@ -1610,3 +1610,105 @@ provider = [["device.zpr.adapter.cn", "webby.zpr.org"]]
         "unexpected error: {msg}"
     );
 }
+
+// ---- zipline#109: authored `zpr.addr` provider pins are rejected ----
+//
+// Static adapter addresses come from a trusted service vending `device.zpr_addr`
+// (umbrella zipline#106); the compiler rejects `["zpr.addr", ...]` in every
+// provider list that routes through `vec_to_attributes`. A node's `zpr_address`
+// is NOT a provider pin and still emits the `zpr.addr` join condition (guarded
+// below). Note: `visa_service.admin_attrs` is not a rejection site because the
+// current compiler does not parse it (`parse_visa_service` accepts only
+// `dock_node`), so no fixture can route a pin through it.
+
+/// Assert the zipline#109 rejection error: it must name `zpr.addr` and point
+/// the author at a `device.zpr_addr` grant.
+fn assert_zpr_addr_pin_rejected(msg: &str) {
+    assert!(
+        msg.contains("zpr.addr") && msg.contains("device.zpr_addr"),
+        "error must reject the pin and name device.zpr_addr: {msg}"
+    );
+}
+
+#[test]
+fn test_zpr_addr_pin_in_service_provider_rejected() {
+    let temp = TempDir::new("zpr-addr-service");
+    let msg = compile_expect_err("bad-zpr-addr-service", &temp);
+    assert_zpr_addr_pin_rejected(&msg);
+}
+
+#[test]
+fn test_zpr_addr_pin_in_node_provider_rejected() {
+    let temp = TempDir::new("zpr-addr-node");
+    let msg = compile_expect_err("bad-zpr-addr-node", &temp);
+    assert_zpr_addr_pin_rejected(&msg);
+}
+
+#[test]
+fn test_zpr_addr_pin_in_trusted_service_provider_rejected() {
+    let temp = TempDir::new("zpr-addr-ts");
+    let msg = compile_expect_err("bad-zpr-addr-trusted-service", &temp);
+    assert_zpr_addr_pin_rejected(&msg);
+}
+
+#[test]
+fn test_zpr_addr_pin_in_oidc_proxy_provider_rejected() {
+    let temp = TempDir::new("zpr-addr-oidc-proxy");
+    let msg = compile_expect_err("bad-zpr-addr-oidc-proxy", &temp);
+    assert_zpr_addr_pin_rejected(&msg);
+}
+
+#[test]
+fn test_zpr_addr_pin_in_unreferenced_service_provider_rejected() {
+    // Review round 1 (zipline#109): the documented contract is a compile error
+    // for an authored pin ANYWHERE in a .zplc. A service the ZPL never
+    // references is not selected by weaving, so a weaving-time check misses it;
+    // the rejection must be eager, at config parse time.
+    let temp = TempDir::new("zpr-addr-unref-service");
+    let msg = compile_expect_err("bad-zpr-addr-unref-service", &temp);
+    assert_zpr_addr_pin_rejected(&msg);
+}
+
+#[test]
+fn test_zpr_addr_pin_in_unreferenced_trusted_service_provider_rejected() {
+    // Same eager-rejection contract for a trusted service the ZPL never
+    // consults: inactive providers must not smuggle a pin past the check.
+    let temp = TempDir::new("zpr-addr-unref-ts");
+    let msg = compile_expect_err("bad-zpr-addr-unref-trusted-service", &temp);
+    assert_zpr_addr_pin_rejected(&msg);
+}
+
+#[test]
+fn test_node_zpr_address_still_emits_join_condition() {
+    // Regression guard: a node's `zpr_address` is topology, not an authored
+    // provider pin. It must still reach the policy as a `zpr.addr` join
+    // condition after the pin rejection (zipline#109).
+    let temp = TempDir::new("node-zpr-addr");
+    let pbytes = compile_policy_bytes("test-file", &temp);
+    let rdr = capnp::serialize::read_message(
+        &mut Cursor::new(pbytes.as_slice()),
+        capnp::message::ReaderOptions::new(),
+    )
+    .unwrap();
+    let policy = rdr.get_root::<policy_capnp::policy::Reader>().unwrap();
+
+    let mut node_addr_condition_found = false;
+    for jp in policy.get_join_policies().unwrap().iter() {
+        for e in jp.get_match().unwrap().iter() {
+            if e.get_key().unwrap().to_str().unwrap() == "zpr.addr" {
+                let vals: Vec<&str> = e
+                    .get_value()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.unwrap().to_str().unwrap())
+                    .collect();
+                assert_eq!(vals, vec!["fd5a:5052:90de::1"]);
+                node_addr_condition_found = true;
+            }
+        }
+    }
+    assert!(
+        node_addr_condition_found,
+        "node zpr_address must still emit a zpr.addr join condition"
+    );
+}
