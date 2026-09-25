@@ -449,16 +449,31 @@ port = 80
 provider = [[ "device.zpr.adapter.cn", "foo.blah"]]
 ```
 
-If you need a static address for a service, the service adapter needs to specify
-a `zpr_addr` in its config file AND the service configuration needs to match
-with a `zpr.addr` attribute.  For example,
+If you need a static address for a service, do NOT put the address in the
+policy — an authored `["zpr.addr", ...]` provider attribute is a compile
+error. Instead, declare a trusted service that returns `device.zpr_addr` for
+the adapter (any API works; `file` is the minimum), keyed on an authenticated
+attribute such as the adapter CN:
 
 ```toml
-[service.WebService]
-protocol = "http"
-port = 80
-provider = [[ "device.zpr.adapter.cn", "foo.blah"], ["zpr.addr", "fd5a:5052:2020::19"]]
+[trusted_services.addresses]
+api = "file"
+returns_attributes = ["zpr_addr -> device.zpr_addr"]
+expiration_seconds = 3600
 ```
+
+with a store file (`<file_ts_dir>/addresses.json`, where `file_ts_dir`
+defaults to the directory of the visa service's `vs.toml`):
+
+```json
+{ "device.zpr.adapter.cn": { "foo.blah": { "zpr_addr": ["fd5a:5052:2020::19"] } } }
+```
+
+The adapter that brings up a static TUN keeps the matching `zpr_addr` in its
+own config file; the visa service checks that the granted address and the
+adapter's requested address agree. Note that a node's static address is
+different: it is topology, set with `zpr_address` in the node's `[nodes.X]`
+block, not granted.
 
 
 
