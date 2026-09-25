@@ -46,6 +46,23 @@ pub const KATTR_ROLE: &str = "zpr.role";
 pub const KATTR_CN: &str = "device.zpr.adapter.cn";
 pub const KATTR_ADDR: &str = "zpr.addr";
 
+/// Attributes in the Device domain that the visa service reads directly,
+/// whether or not any ZPL statement references them (zipline#105). A trusted
+/// service vending one of these must be retained by the weaver even when
+/// nothing else marks it used -- see `Weaver::retain_vs_interpreted_providers`.
+///
+/// The compiler cannot depend on `libeval`, so like `KATTR_CN` these are
+/// spelled here and MUST stay in sync with the visa service:
+/// - `device.zpr_addr`: the static-address grant --
+///   `zl-zpr-visaservice/vs/src/connection_control.rs`, `key::DEVICE_ZPR_ADDR`.
+/// - `device.hostname`: the DNS hosts index --
+///   `zl-zpr-visaservice/vs/src/db/actor.rs`, `ATTR_DEVICE_HOSTNAME`.
+///
+/// Entries are full ZPL keys (domain prefix included), matching
+/// `Attribute::zpl_key()` on a Device-domain tuple attribute and the spelling
+/// of the visa-service constants above.
+pub const KATTR_VS_INTERPRETED: [&str; 2] = ["device.zpr_addr", "device.hostname"];
+
 // Authority presence markers (issue #144). The visa service installs
 // `<ns>.zpr.authority` exactly when a non-expired authentication exists for
 // that namespace, so `has user.zpr.authority` reads as "a live user
