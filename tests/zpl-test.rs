@@ -415,7 +415,7 @@ fn test_file_trusted_service_end_to_end() {
 
 #[test]
 fn test_identity_vendor_retained_end_to_end() {
-    // The master plan's Background configuration: `google` (oidc, vends
+    // The zipline#22 configuration: `google` (oidc, vends
     // identity attribute `sub`) plus `happyfile` (file store keyed on
     // user.sub). The single relevant policy statement references only the
     // file store's attribute, so nothing marks `google` used -- the

@@ -1,6 +1,6 @@
 # oidc + file trusted-service interplay (zipline#23).
-# The Background configuration from the master plan
-# (docs/plans/2026-09-14-trusted-service-interplay.md): an off-net OIDC
+# The zipline#22 configuration (rationale: zl-zpr-dev-context/docs/VISA_SERVICE.md,
+# "Design decisions"): an off-net OIDC
 # identity vendor plus a file attribute store keyed on its identity
 # attribute (user.sub). No policy statement references google's returned
 # attributes; the identity-vendor rule must retain it anyway.
