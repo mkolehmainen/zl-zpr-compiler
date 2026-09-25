@@ -1,0 +1,22 @@
+# Visa-service-interpreted retention, referenced-store variant (zipline#105).
+# `dualstore` vends both a ZPL-referenced attribute (user.hair_color) and a
+# visa-service-interpreted one (device.zpr_addr): the attribute reference
+# already marks it used, so the retain pass must not weave it twice.
+
+[nodes.n0]
+provider = [["device.zpr.adapter.cn", "node.zpr.org"]]
+zpr_address = "fd5a:5052:90de::1"
+
+[trusted_services.dualstore]
+api = "file"
+returns_attributes = ["addr -> device.zpr_addr", "hair_color -> user.hair_color"]
+expiration_seconds = 3600
+
+[protocols.http]
+l4protocol = "TCP"
+port = 80
+
+[services.Web]
+protocol = "http"
+port = 80
+provider = [["device.zpr.adapter.cn", "web.zpr.org"]]

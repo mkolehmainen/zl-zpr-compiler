@@ -1,0 +1,33 @@
+# Visa-service-interpreted attribute retention (zipline#105).
+# `addrstore` and `hoststore` vend only attributes the visa service reads
+# directly (device.zpr_addr, device.hostname); no ZPL statement references
+# them, so only the retain rule keeps them woven. `colorstore` vends an
+# ordinary unreferenced attribute and must be pruned as before.
+
+[nodes.n0]
+provider = [["device.zpr.adapter.cn", "node.zpr.org"]]
+zpr_address = "fd5a:5052:90de::1"
+
+[trusted_services.addrstore]
+api = "file"
+returns_attributes = ["addr -> device.zpr_addr"]
+expiration_seconds = 3600
+
+[trusted_services.hoststore]
+api = "file"
+returns_attributes = ["hostnames -> device.hostname{}"]
+expiration_seconds = 3600
+
+[trusted_services.colorstore]
+api = "file"
+returns_attributes = ["color -> user.color"]
+expiration_seconds = 3600
+
+[protocols.http]
+l4protocol = "TCP"
+port = 80
+
+[services.Web]
+protocol = "http"
+port = 80
+provider = [["device.zpr.adapter.cn", "web.zpr.org"]]

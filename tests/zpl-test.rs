@@ -464,6 +464,93 @@ fn test_identity_vendor_retained_end_to_end() {
     );
 }
 
+/// Compile the zipline#105 retention fixture and return the decoded
+/// trustedServices records. The fixture declares three file stores none of
+/// whose returned attributes are referenced by ZPL: `addrstore` (vends only
+/// `device.zpr_addr`), `hoststore` (vends only `device.hostname{}`) and
+/// `colorstore` (vends only `user.color`).
+fn retain_fixture_records(tag: &str) -> Vec<TrustedService> {
+    let temp = TempDir::new(tag);
+    let pbytes = compile_policy_bytes("retain-vs-interpreted", &temp);
+    let rdr = capnp::serialize::read_message(
+        &mut Cursor::new(pbytes.as_slice()),
+        capnp::message::ReaderOptions::new(),
+    )
+    .unwrap();
+    let policy = rdr.get_root::<policy_capnp::policy::Reader>().unwrap();
+    decode_records(&policy)
+}
+
+#[test]
+fn test_vs_interpreted_zpr_addr_vendor_retained() {
+    // zipline#105: a file store vending only `device.zpr_addr` -- an attribute
+    // the visa service reads directly (connection_control's static-address
+    // grant), never referenced by ZPL -- must survive pruning.
+    let records = retain_fixture_records("retain-zpr-addr");
+    let addrstore = records
+        .iter()
+        .find(|r| r.service_id == "addrstore")
+        .expect("addrstore vends device.zpr_addr and must be retained");
+    assert!(addrstore.identity_attrs.is_empty());
+    assert_eq!(mappings(addrstore), vec![("addr", "device.zpr_addr")]);
+}
+
+#[test]
+fn test_vs_interpreted_hostname_vendor_retained() {
+    // zipline#105: same as above for `device.hostname{}` (multi-valued
+    // spelling), the attribute behind the visa service's DNS hosts index.
+    let records = retain_fixture_records("retain-hostname");
+    let hoststore = records
+        .iter()
+        .find(|r| r.service_id == "hoststore")
+        .expect("hoststore vends device.hostname and must be retained");
+    assert!(hoststore.identity_attrs.is_empty());
+    assert_eq!(
+        mappings(hoststore),
+        vec![("hostnames", "device.hostname{}")]
+    );
+}
+
+#[test]
+fn test_unreferenced_ordinary_vendor_still_pruned() {
+    // zipline#105 negative case: a store vending only an ordinary
+    // unreferenced attribute (`user.color`) is NOT visa-service-interpreted
+    // and must still be pruned.
+    let records = retain_fixture_records("retain-negative");
+    assert!(
+        !records.iter().any(|r| r.service_id == "colorstore"),
+        "colorstore vends nothing the visa service interprets and must stay pruned"
+    );
+}
+
+#[test]
+fn test_referenced_and_vs_interpreted_vendor_woven_once() {
+    // zipline#105: a store that is BOTH referenced by ZPL and a
+    // visa-service-interpreted vendor is marked used by the ordinary
+    // attribute-reference path before the retain pass runs; the retain pass
+    // must skip it, leaving exactly one woven record (and emitting no
+    // retention diagnostic for it).
+    let temp = TempDir::new("retain-dual");
+    let pbytes = compile_policy_bytes("retain-referenced-and-vs", &temp);
+    let rdr = capnp::serialize::read_message(
+        &mut Cursor::new(pbytes.as_slice()),
+        capnp::message::ReaderOptions::new(),
+    )
+    .unwrap();
+    let policy = rdr.get_root::<policy_capnp::policy::Reader>().unwrap();
+    assert!(
+        policy.has_trusted_services(),
+        "policy must have trustedServices"
+    );
+    let records = decode_records(&policy);
+    let ids: Vec<&str> = records.iter().map(|r| r.service_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["dualstore"],
+        "dualstore must be woven exactly once"
+    );
+}
+
 #[test]
 fn test_validation2_regression() {
     // test-bas is validation/2-only; the sole new artifact is the `bas` trustedServices record.
