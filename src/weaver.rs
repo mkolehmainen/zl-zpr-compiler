@@ -1289,6 +1289,51 @@ impl Weaver {
         }
     }
 
+    /// Retain every trusted service that vends an attribute the visa service
+    /// itself interprets (`zpl::KATTR_VS_INTERPRETED`: `device.zpr_addr`,
+    /// `device.hostname`), whether or not any ZPL statement references its
+    /// returned attributes (zipline#105).
+    ///
+    /// Without this rule a store vending only these attributes is pruned with
+    /// no error, and the deployment silently misbehaves: the device comes up on
+    /// a pool address instead of its static grant, or the DNS hosts index stays
+    /// empty. Any trusted-service API qualifies (`file`, `zpr-attr/1`,
+    /// `validation/2`, `oidc`), because any declared service may grant.
+    ///
+    /// Known trade-off, accepted in zipline#105: an unused networked store that
+    /// happens to vend one of these attributes is now woven, giving the visa
+    /// service a network dependency it previously pruned -- the same price as
+    /// `retain_identity_vendors`. The `ctx.info()` line makes each retention
+    /// visible at build time (`info`, not `warn`, so it cannot trip `--Werror`).
+    fn retain_vs_interpreted_providers(&mut self, config: &ConfigApi, ctx: &CompilationCtx) {
+        let mut ts_names = config.must_get_keys("/trusted_services");
+        ts_names.sort(); // deterministic diagnostics
+        for ts_name in ts_names {
+            if ts_name == zpl::DEFAULT_TRUSTED_SERVICE_ID
+                || self.wctx.used_trusted_services.contains(&ts_name)
+            {
+                continue;
+            }
+            let mappings =
+                config.must_get_attr_mappings(&format!("/trusted_services/{ts_name}/attributes"));
+            // Compare the decoded `Attribute` (domain + zpl_key), not the raw
+            // `zpr_attr_spec`, so the `{}` multi-valued spelling and any
+            // whitespace in the config do not matter.
+            let vs_interpreted = mappings.iter().find(|m| {
+                *m.attr.get_domain_ref() == AttrDomain::Device
+                    && zpl::KATTR_VS_INTERPRETED.contains(&m.attr.zpl_key().as_str())
+            });
+            if let Some(mapping) = vs_interpreted {
+                ctx.info(&format!(
+                    "trusted service `{ts_name}` retained: vends visa-service-interpreted \
+                     attribute `{}`",
+                    mapping.attr.zpl_key()
+                ));
+                self.wctx.add_used_trusted_service(ts_name);
+            }
+        }
+    }
+
     /// Add non-default trusted services to the fabric.
     fn add_trusted_services(
         &mut self,
@@ -1299,6 +1344,10 @@ impl Weaver {
         // retained service's own provider attributes (a `validation/2` identity
         // vendor; an `oidc` JWKS proxy) still resolve through it.
         self.retain_identity_vendors(config, ctx);
+        // Same ordering argument for vendors of visa-service-interpreted
+        // attributes (zipline#105): retain before the provider fixpoint so a
+        // retained service's provider attributes still resolve.
+        self.retain_vs_interpreted_providers(config, ctx);
         self.resolve_trusted_service_providers(config, ctx)?;
 
         // Copy the used trusted service names into a stand alone, sorted vector: it avoids
