@@ -16,15 +16,19 @@ pub const TAG_PREFIX: &str = "#";
 pub fn vec_to_attributes(v: &[(String, String)]) -> Result<Vec<Attribute>, CompilationError> {
     let mut attrs = Vec::new();
     for (k, v) in v {
-        // `zpr.addr` lives in the ZPR-internal domain, which parse_domain rejects.
-        // Route it through the internal constructor so it can appear in a provider clause.
-        // This is currently how we assign a static address to a service.
-        // Will need to be rethought in the future - see https://github.com/org-zpr/zpr-compiler/issues/133
-        let attr = if k == crate::zpl::KATTR_ADDR {
-            Attribute::try_zpr_internal_attr(k, v)?
-        } else {
-            Attribute::tuple(k).single().value(v).build()?
-        };
+        // An authored `zpr.addr` pin is no longer accepted (zipline#106/#109):
+        // a static adapter address is granted by a trusted service that returns
+        // `device.zpr_addr`, not written into policy. Reject it with a message
+        // that says what to write instead. Every other `zpr.*` key is rejected
+        // by parse_domain inside the builder below.
+        if k == crate::zpl::KATTR_ADDR {
+            return Err(CompilationError::ConfigError(format!(
+                "`{}` cannot be set in policy; grant a static adapter address with a \
+                 trusted service that returns `device.zpr_addr` (see README_ZPLC.md)",
+                crate::zpl::KATTR_ADDR
+            )));
+        }
+        let attr = Attribute::tuple(k).single().value(v).build()?;
         attrs.push(attr);
     }
     Ok(attrs)

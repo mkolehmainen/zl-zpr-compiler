@@ -569,14 +569,13 @@ impl Weaver {
                     self.wctx
                         .add_used_trusted_service(zpl::DEFAULT_TRUSTED_SERVICE_ID);
                 }
-                // zpr.addr is a compiler-internal attribute vouched for by the default
-                // trusted service, not something an external service reports.
-                // See https://github.com/org-zpr/zpr-compiler/issues/133
-                zpl::KATTR_ADDR => {
-                    resolved_attrs.push(zpl_attr.clone());
-                    self.wctx
-                        .add_used_trusted_service(zpl::DEFAULT_TRUSTED_SERVICE_ID);
-                }
+                // Note there is deliberately no arm for zpl::KATTR_ADDR here
+                // (zipline#109): an authored `zpr.addr` provider pin is rejected
+                // in vec_to_attributes before resolution, and the node emitter
+                // (init_nodes) constructs the node's `zpr.addr` attribute AFTER
+                // its provider attributes are resolved, so the key never reaches
+                // this function. An unexpected occurrence falls through to the
+                // "not found in any trusted service" rejection below.
                 // The authority presence markers are installed by the visa
                 // service when a live authentication exists for that namespace
                 // (issue #144) -- they are not attributes an external trusted
