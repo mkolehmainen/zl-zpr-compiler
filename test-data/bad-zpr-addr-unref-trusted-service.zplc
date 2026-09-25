@@ -1,0 +1,36 @@
+# Companion config for bad-zpr-addr-unref-trusted-service.zpl (zipline#109
+# review round 1). The ZPL only uses `attrfile` attributes, so the `bas`
+# trusted service is inactive — no weaving path resolves through it — yet the
+# ["zpr.addr", ...] pin in its provider must still be a compile error, caught
+# at config parse time.
+
+[nodes.n0]
+provider = [["device.zpr.adapter.cn", "node.zpr.org"]]
+zpr_address = "fd5a:5052:90de::1"
+
+[trusted_services.attrfile]
+api = "file"
+returns_attributes = ["redhead -> #user.redhead"]
+expiration_seconds = 3600
+
+# Inactive: nothing in the ZPL uses any attribute this service vouches for.
+[trusted_services.bas]
+api = "validation/2"
+client = "AuthService"
+cert_path = "bas-tls.crt"
+returns_attributes = [ "bas_id -> user.bas_id" ]
+identity_attributes = [ "bas_id" ]
+provider = [[ "device.zpr.adapter.cn", "bas.zpr.org" ], ["zpr.addr", "fd5a:5052:8888::99"]]
+
+[protocols.http]
+l4protocol = "TCP"
+port = 80
+
+[services.web]
+protocol = "http"
+port = "80"
+provider = [["device.zpr.adapter.cn", "web.org"]]
+
+[services.AuthService]
+protocol = "zpr-oauthrsa"
+port = 4444

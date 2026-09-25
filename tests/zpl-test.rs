@@ -1659,6 +1659,26 @@ fn test_zpr_addr_pin_in_oidc_proxy_provider_rejected() {
 }
 
 #[test]
+fn test_zpr_addr_pin_in_unreferenced_service_provider_rejected() {
+    // Review round 1 (zipline#109): the documented contract is a compile error
+    // for an authored pin ANYWHERE in a .zplc. A service the ZPL never
+    // references is not selected by weaving, so a weaving-time check misses it;
+    // the rejection must be eager, at config parse time.
+    let temp = TempDir::new("zpr-addr-unref-service");
+    let msg = compile_expect_err("bad-zpr-addr-unref-service", &temp);
+    assert_zpr_addr_pin_rejected(&msg);
+}
+
+#[test]
+fn test_zpr_addr_pin_in_unreferenced_trusted_service_provider_rejected() {
+    // Same eager-rejection contract for a trusted service the ZPL never
+    // consults: inactive providers must not smuggle a pin past the check.
+    let temp = TempDir::new("zpr-addr-unref-ts");
+    let msg = compile_expect_err("bad-zpr-addr-unref-trusted-service", &temp);
+    assert_zpr_addr_pin_rejected(&msg);
+}
+
+#[test]
 fn test_node_zpr_address_still_emits_join_condition() {
     // Regression guard: a node's `zpr_address` is topology, not an authored
     // provider pin. It must still reach the policy as a `zpr.addr` join
