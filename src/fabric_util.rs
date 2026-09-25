@@ -71,12 +71,16 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_zpr_addr_allowed_but_other_internal_rejected() {
-        // zpr.addr is permitted and lands in the ZPR-internal domain.
-        let ok = vec_to_attributes(&[("zpr.addr".to_string(), "fd5a:5052:8888::9".to_string())])
-            .expect("zpr.addr should be allowed");
-        assert_eq!(ok.len(), 1);
-        assert_eq!(ok[0].zpl_key(), "zpr.addr");
+    fn test_zpr_addr_rejected_in_provider_lists() {
+        // zipline#109: an authored zpr.addr pin in any provider list is a compile
+        // error. Static adapter addresses are granted by a trusted service that
+        // returns device.zpr_addr; the error must say so.
+        let err = vec_to_attributes(&[("zpr.addr".to_string(), "fd5a:5052:8888::9".to_string())])
+            .expect_err("an authored zpr.addr provider attribute must be rejected");
+        assert!(
+            err.to_string().contains("device.zpr_addr"),
+            "error must point the author at a device.zpr_addr grant: {err}"
+        );
 
         // Other zpr.* keys still fail the domain check (no spoofing internal attrs).
         assert!(vec_to_attributes(&[("zpr.role".to_string(), "node".to_string())]).is_err());
