@@ -20,5 +20,5 @@ serde_json = "1.0.150"
 thiserror = "2.0.8"
 toml = "0.9.7"
 url = "2.5.8"
-zpr = { git = "https://github.com/mkolehmainen/zl-zpr-common.git", tag = "v0.29.0", features = ["policy"] }
+zpr = { git = "https://github.com/mkolehmainen/zl-zpr-common.git", tag = "v0.29.1", features = ["policy"] }
 
