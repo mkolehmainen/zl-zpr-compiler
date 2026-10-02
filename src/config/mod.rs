@@ -12,9 +12,9 @@ use toml::Table;
 use crate::context::CompilationCtx;
 use crate::crypto::sha256;
 use crate::errors::CompilationError;
-use crate::protocols::{IcmpFlowType, PortSpec, Protocol, ProtocolError, ZPR_L7_BUILTINS};
+use crate::protocols::{IcmpFlowType, PortSpec, Protocol, ProtocolError};
 use crate::zpl;
-use zpr::policy_types::{AttrMapping, parse_attribute_mapping};
+use zpr::policy_types::AttrMapping;
 
 mod node_link;
 mod protocol;
@@ -24,7 +24,7 @@ mod trusted_service;
 use node_link::{parse_link, parse_node, parse_substrate_addrs};
 use protocol::parse_protocol;
 use service::parse_service;
-use trusted_service::{parse_trusted_service, validate_ts_id};
+use trusted_service::{builtin_default_trusted_service, parse_trusted_service, validate_ts_id};
 
 /// Helper to create a ConfigError. Works with a single string (or &str) argument
 /// (really anything that has a to_string function), or with two args: a format string and arguments.
@@ -149,12 +149,12 @@ pub struct TrustedService {
     pub id: String,
     pub api: String,
     pub expiration_seconds: u32, // 0 = service/VS default
-    pub service: Option<String>, // Name of service for VS operations
-    pub client: Option<String>,  // Name of service for client operations
+    /// `api = "oidc"` only: the optional on-net JWKS proxy service.
+    pub service: Option<String>,
+    /// Builtin `default` service only: CA certificate that signs adapter certificates.
     pub cert_path: Option<PathBuf>,
     pub returns_attrs: Vec<AttrMapping>, // ordered service-key -> attribute mappings
     pub identity_attrs: Vec<String>,
-    pub provider: Option<Vec<(String, String)>>, // required for non-default
     /// Set when `api = "oidc"`. Read by the weaver in OIDC-B2; until then only
     /// tests consume it, so it is exempted from dead-code analysis.
     #[allow(dead_code)]
@@ -249,8 +249,7 @@ impl ConfigParse {
 
         let bootstrap = self.parse_bootstrap(ctx)?;
         let trusted_services = self.parse_trusted_services(ctx)?;
-        let mut protocols = self.parse_protocols(ctx)?;
-        self.add_default_protocols(&mut protocols);
+        let protocols = self.parse_protocols(ctx)?;
         let services = self.parse_services(ctx, &protocols)?;
         Ok(Config {
             digest: self.digest,
@@ -263,16 +262,6 @@ impl ConfigParse {
             protocols,
             services,
         })
-    }
-
-    // Note that these are added with their default ports.
-    fn add_default_protocols(&self, protocols: &mut HashMap<String, Protocol>) {
-        for pname in ZPR_L7_BUILTINS {
-            protocols.insert(
-                pname.to_string(),
-                Protocol::new_zpr_l7(pname.to_string(), pname.to_string(), None).unwrap(),
-            );
-        }
     }
 
     /// Parse the resolver section which is optional.  The defualt is just
@@ -542,24 +531,7 @@ impl ConfigParse {
             trusted_services.push(ts);
         }
         if default_creates == 0 {
-            let returns = vec![
-                parse_attribute_mapping(&format!("{} -> {}", zpl::KATTR_CN, zpl::KATTR_CN))
-                    .unwrap(),
-            ];
-            let ts = TrustedService {
-                id: zpl::DEFAULT_TRUSTED_SERVICE_ID.to_string(),
-                api: zpl::DEFAULT_TRUSTED_SERVICE_API.to_string(),
-                expiration_seconds: 0,
-                cert_path: None,
-                returns_attrs: returns,
-                identity_attrs: vec![zpl::KATTR_CN.to_string()],
-                provider: None,
-                client: None,
-                service: None,
-                oidc: None,
-                attr_query: None,
-            };
-            trusted_services.push(ts);
+            trusted_services.push(builtin_default_trusted_service(None));
         }
         Ok(trusted_services)
     }
@@ -1148,12 +1120,8 @@ mod test {
         // and with api succeeds
         let tstr = r#"
         [trusted_services.other]
-        api = "validation/2"
-        cert_path = "foo.pem"
-        prefix = "bar.hop"
+        api = "file"
         returns_attributes = ["a -> user.a", "c -> user.c"]
-        identity_attributes = ["c"]
-        provider = [["foo", "bar"]]
         "#;
         let mut cparser = ConfigParse::new_from_toml_str(tstr).unwrap();
         let ctx = CompilationCtx::default();
@@ -1161,13 +1129,11 @@ mod test {
         if services.is_err() {
             panic!("parse_trusted_services failed: {:?}", services);
         }
-        assert!(services.is_ok());
         let services = services.unwrap();
         assert_eq!(services.len(), 2);
         let ts = services.get(0).unwrap();
         assert_eq!(ts.id, "other");
-        assert_eq!(ts.api, "validation/2");
-        assert_eq!(ts.cert_path, Some(PathBuf::from("foo.pem")));
+        assert_eq!(ts.api, zpl::TS_API_FILE);
         assert_eq!(ts.returns_attrs.len(), 2);
         let get = |k: &str| {
             ts.returns_attrs
@@ -1179,8 +1145,6 @@ mod test {
         };
         assert_eq!(get("a"), "user.a");
         assert_eq!(get("c"), "user.c");
-        assert_eq!(ts.identity_attrs.len(), 1);
-        assert!(ts.identity_attrs[0] == "c");
     }
 
     #[test]
@@ -1188,12 +1152,8 @@ mod test {
         // Should fail because we have duplicate keys (even though different namespaces)
         let tstr = r##"
         [trusted_services.other]
-        api = "validation/2"
-        cert_path = "foo.pem"
-        prefix = "bar.hop"
+        api = "file"
         returns_attributes = ["foo -> user.foo", "fee -> user.fee", "foo -> #device.foo"]
-        identity_attributes = ["foo"]
-        provider = [["foo", "bar"]]
         "##;
         let mut cparser = ConfigParse::new_from_toml_str(tstr).unwrap();
         let ctx = CompilationCtx::default();
@@ -1211,65 +1171,30 @@ mod test {
         }
     }
 
+    /// Only `file`, `oidc` and `zpr-attr/1` are accepted. The retired
+    /// `validation/1` and `validation/2` APIs (and any other value) are a
+    /// configuration error naming the supported APIs.
     #[test]
-    fn test_parse_trusted_service_prefix_not_required() {
-        let tstr = r#"
-        [trusted_services.other]
-        api = "validation/2"
-        cert_path = "foo.pem"
-        returns_attributes = ["a -> user.a", "c -> user.c"]
-        identity_attributes = ["c"]
-        provider = [["foo", "bar"]]
-        "#;
-        let mut cparser = ConfigParse::new_from_toml_str(tstr).unwrap();
-        let ctx = CompilationCtx::default();
-        let services = cparser.parse_trusted_services(&ctx);
-        if services.is_err() {
-            panic!("parse_trusted_services failed: {:?}", services);
+    fn test_parse_trusted_service_unsupported_api() {
+        for api in ["validation/1", "validation/2", "bogus"] {
+            let tstr = format!(
+                r#"
+                [trusted_services.other]
+                api = "{api}"
+                returns_attributes = ["a -> user.a"]
+                "#
+            );
+            let mut cparser = ConfigParse::new_from_toml_str(&tstr).unwrap();
+            let ctx = CompilationCtx::default();
+            let err = cparser.parse_trusted_services(&ctx).unwrap_err();
+            assert!(
+                err.to_string().contains(&format!(
+                    "trusted_service other has unsupported api \"{api}\" \
+                     (expected \"file\", \"oidc\" or \"zpr-attr/1\")"
+                )),
+                "api {api}: {err}"
+            );
         }
-        assert!(services.is_ok());
-        let services = services.unwrap();
-        assert_eq!(services.len(), 2);
-        let ts = services.get(0).unwrap();
-        assert_eq!(ts.id, "other");
-        assert_eq!(ts.api, "validation/2");
-        assert_eq!(ts.cert_path, Some(PathBuf::from("foo.pem")));
-        assert_eq!(ts.returns_attrs.len(), 2);
-        assert_eq!(ts.identity_attrs.len(), 1);
-        assert_eq!(ts.client, Some("other-client".to_string()));
-        assert_eq!(ts.service, Some("other-vs".to_string()));
-    }
-
-    #[test]
-    fn test_parse_trusted_service_bas() {
-        let tstr = r#"
-        [trusted_services.bas]
-        api = "validation/2"
-        cert_path = "foo.crt"
-        returns_attributes = ["a -> user.a", "c -> user.c"]
-        identity_attributes = ["c"]
-        provider = [["foo", "bar"]]
-        client = "bas-client-interface"
-        service = "bas-vs-interface"
-        "#;
-        let mut cparser = ConfigParse::new_from_toml_str(tstr).unwrap();
-        let ctx = CompilationCtx::default();
-        let services = cparser.parse_trusted_services(&ctx);
-        assert!(services.is_ok(), "{:?}", services.unwrap_err());
-        let services = services.unwrap();
-        assert_eq!(services.len(), 2);
-        let ts = services.get(0).unwrap();
-        assert_eq!(ts.id, "bas");
-        assert_eq!(ts.api, "validation/2");
-        assert_eq!(ts.cert_path, Some(PathBuf::from("foo.crt")));
-        assert!(ts.provider.is_some());
-        let provider = ts.provider.as_ref().unwrap();
-        assert_eq!(provider.len(), 1);
-        assert!(provider.contains(&("foo".to_string(), "bar".to_string())));
-        assert_eq!(ts.returns_attrs.len(), 2);
-        assert_eq!(ts.identity_attrs.len(), 1);
-        assert_eq!(ts.client, Some("bas-client-interface".to_string()));
-        assert_eq!(ts.service, Some("bas-vs-interface".to_string()));
     }
 
     #[test]
@@ -1393,13 +1318,19 @@ mod test {
     fn test_parse_services_with_ports() {
         let tstr = r#"
         [services.MyService]
-        protocol = "zpr-oauthrsa"
+        protocol = "http"
         port = "3000"
         "#;
         let mut cparser = ConfigParse::new_from_toml_str(tstr).unwrap();
         let ctx = CompilationCtx::default();
         let mut protocols = HashMap::new();
-        cparser.add_default_protocols(&mut protocols);
+        protocols.insert(
+            "http".to_string(),
+            Protocol::tcp("http")
+                .add_port(PortSpec::Single(80))
+                .build()
+                .unwrap(),
+        );
         let services = cparser.parse_services(&ctx, &protocols);
         if services.is_err() {
             panic!("parse_services failed: {:?}", services);

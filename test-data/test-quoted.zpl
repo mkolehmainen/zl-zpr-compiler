@@ -11,9 +11,6 @@ define mostexcellentuser as a user with color:green.
 allow  mostexcellentuser to access mygreatservice.
 
 
-define AuthService as a service.
-allow zpr.adapter.cn: devices to access AuthService.
-
 # define NetAdmins as users with device.zpr.adapter.cn:'admin.zpr.org'
 
 # VisaService is a reserved name.

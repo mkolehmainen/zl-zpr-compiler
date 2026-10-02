@@ -100,26 +100,23 @@ Tags carry no value, so only the attribute check applies to them.
 
 ## Trusted Services
 
-The trusted services block contains details about the API to use to talk to it, as
-well as things like attributes returned.
+The trusted services block declares where actor attributes come from: which API the
+visa service uses to reach the service, and which attributes it vouches for.
 
 Syntax:
 
 ```toml
-  [trusted_service.<TSNAME>]
-  api = "validation/2"
-  service = ""
-  client = ""
-  cert_path = ""
+  [trusted_services.<TSNAME>]
+  api = "file"            # or "oidc" or "zpr-attr/1"
   returns_attributes = []
-  identity_attributes = []
-  provider = []
+  expiration_seconds = 0
+  # ...plus the properties specific to the chosen api (see below)
 ```
 
 The **TSNAME** of `default` is special and is used to check the adapter CN values.
 It is responsible for the property: `device.zpr.adapter.cn`.  The default
-service requires a `cert_path` which should be set to the certificate of the
-authority which has signed the NOISE certs given to the adapters.
+service takes no `api`, and its only property is `cert_path`, which should be set to the
+certificate of the authority which has signed the NOISE certs given to the adapters.
 
 ```toml
 [trusted_services.default]
@@ -129,12 +126,10 @@ cert_path = "path/to/ca/cert.pem"
 
 If you omit `trusted_services.default` then certificates will not be checked.
 
-For non default trusted services, the field meanings are:
+For non default trusted services, the common field meanings are:
 
-* `api` - Configures how the visa service uses the trusted service. Valid values are:
-  * `validation/2` - An validation service.  Meaning that the service can provide
-     validation of authentication to a visa service, and actor authentication services
-     to an adapter.
+* `api` - **Required.** Configures how the visa service uses the trusted service. Valid
+  values are:
   * `file` - A file-backed attribute source offered by the visa service itself, with no
      network presence. The visa service loads the attributes from a local `<TSNAME>.json`
      file at runtime. See *File Trusted Services* below.
@@ -143,21 +138,12 @@ For non default trusted services, the field meanings are:
      See *OIDC Trusted Services* below.
   * `zpr-attr/1` - A networked attribute service the visa service queries over HTTPS.
      See *Attribute Services (zpr-attr/1)* below.
-  * *addition values TBD*
-* `service` - Sets the service ID used in the **services** block for the visa-service
-  facing service provided by this trusted service.  This is *optional* and by default
-  the compiler expects to find a service block named `<TSNAME>-vs`.
-* `client` - Sets the service ID used in the **services** block for the actor/adapter
-  facing service provided by this trusted service.  This is *optional* and by default
-  the compiler expects to find a service block named `<TSNAME>-client`.
-* `cert_path` - Used to pass a TLS certificate to the visa service which is used to
-  verify the service connection.
+
+  Any other value is a configuration error.
 * `returns_attributes` - List of attribute keys returned by the service mapped to
   ZPL attribute names.
-* `identity_attributes` - Subset of the `returns_attributes` that denote identity.
-* `provider` - Attribute key/value tuples of the actor (or actors) that provide this service.
 * `expiration_seconds` - Optional lifetime (in seconds) of the attributes this service vouches
-  for. Accepted on `validation/2`, `file`, `oidc`, and `zpr-attr/1` services (required and
+  for. Accepted on `file`, `oidc`, and `zpr-attr/1` services (required and
   positive for `oidc` and `zpr-attr/1`); rejected on `default`. Must be a
   non-negative integer that fits in a 32-bit unsigned value. Omitted or `0` means the visa
   service selects the lifetime at runtime (from the service or its own default).
@@ -165,35 +151,12 @@ For non default trusted services, the field meanings are:
 Every trusted-service ID (the `<TSNAME>`) must match `[A-Za-z0-9_-]+`. For a `file` service this
 ID is also the filename stem — the visa service loads attributes from `<TSNAME>.json`.
 
-
-A trusted service for validation is really two services: the service that the visa service
-talks to to confirm authentication and retrieve attributes, and the service that an actor
-talks to to perform authentication.  These services use varying protocols and ports like
-any service on the ZPRnet.  To configure these services, the compiler requires that there
-are `services` blocks defined in the usual way.  The IDs attached to these blocks are either
-defaults or are set using the `service` and `client` properties of the trusted service
-(see above).
-
-Communication with the trusted service uses a set of pre-defined protocols which must be
-supported by the ZPR implementation.  The protocols defined in the ZPR Referernce
-Implementation are:
-
-* `zpr-oauthrsa` - An actor OAuth-derived HTTPS protocol used by an adapter to authenicate its
-  actor using an RSA key.
-* `zpr-validation2`- A visa service HTTPS OAuth protocol which allows the visa service to
-  request an authentication token based on an identifier.
-
-Example:
-
-```toml
-[services.foo-vs]
-protocol = "zpr-validation2"
-port = 4444
-
-[services.foo-client]
-protocol = "zpr-oauthrsa"
-port = 1234
-```
+No trusted service has a ZPR network presence of its own: a `file` service is offered by
+the visa service itself, and `oidc` and `zpr-attr/1` services are reached over ordinary IP
+(an `oidc` service may name an ordinary on-net service as its JWKS proxy; see below).
+The compiler therefore weaves every trusted service with no endpoints and no communication
+policy, and the network-service properties `provider`, `client`, `cert_path` and `prefix`
+are rejected on every API.
 
 ### File Trusted Services
 
@@ -316,7 +279,7 @@ Properties:
 
 An attribute service is a decorating store keyed on other services' identities, so
 `identity_attributes` is **not** allowed (the same rule as `api = "file"`). The
-BAS-era `provider`, `client`, `cert_path`, and `prefix` properties are not allowed
+`provider`, `client`, `cert_path`, and `prefix` properties are not allowed
 either. **`service` is reserved**: it will one day name a ZPR service through which the
 visa service reaches an on-net attribute service; in `zpr-attr/1` it is rejected, and
 reaching the service over ordinary IP is the only mode. The `default` trusted service
@@ -354,16 +317,16 @@ returns_attributes = [
   "tint -> device.tint",
   "color -> user.color",
   "govt -> #user.government",
-  "bas_id -> user.id",
+  "sub -> user.id",
   "roles -> user.role{}"
 ]
 ```
 
-And then for `identity_attributes` make sure to use the service name (not the
-ZPL name).  For example, given the above returns attributes:
+And then for `identity_attributes` (only an `oidc` service declares them) make sure to
+use the service name (not the ZPL name).  For example, given the above returns attributes:
 
 ```toml
-identity_attributes = [ "bas_id" ]
+identity_attributes = [ "sub" ]
 ```
 
 

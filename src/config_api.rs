@@ -321,10 +321,8 @@ impl ConfigApi {
     // - /trusted_services -> returns list of IDs of the trusted services (KeySet)
     // - /trusted_services/<foo> -> returns (type ?)
     // - /trusted_services/<foo>/api -> the api value
-    // - /trusted_services/<foo>/vs_service -> the visa service "service" name
-    // - /trusted_services/<foo>/client_service -> the client service "service" name
-    // - /trusted_services/<foo>/certificate -> returns certificate (if any)
-    // - /trusted_services/<foo>/provider -> k/v tuples
+    // - /trusted_services/<foo>/vs_service -> the oidc JWKS proxy "service" name (if any)
+    // - /trusted_services/<foo>/certificate -> returns certificate (default service only)
     // - /trusted_services/<foo>/attributes -> HashMap of attribute mappings
     // - /trusted_services/<foo>/id_attributes -> list of service attribute names
     //
@@ -573,14 +571,6 @@ impl ConfigApi {
             }
             "vs_service" => match svc.service {
                 Some(ref vs) => Some(ConfigItem::StrVal(vs.clone())),
-                None => None,
-            },
-            "client_service" => match svc.client {
-                Some(ref cs) => Some(ConfigItem::StrVal(cs.clone())),
-                None => None,
-            },
-            "provider" => match &svc.provider {
-                Some(provider) => Some(ConfigItem::AttrList(provider.clone())),
                 None => None,
             },
             "expiration_seconds" => Some(ConfigItem::U32(svc.expiration_seconds)),

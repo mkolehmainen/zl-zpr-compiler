@@ -1,15 +1,10 @@
 use core::fmt;
 
-use crate::zpl;
-
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 #[allow(dead_code)]
 pub enum ProtocolError {
-    #[error("invalid layer 7 protocol name: {0}")]
-    InvalidL7ProtocolName(String),
-
     #[error("invalid protocol: {0}")]
     InvalidProtocol(String),
 
@@ -25,14 +20,6 @@ pub enum ProtocolError {
     #[error("invalid ICMP flow type for protocol: {0}")]
     InvalidIcmp(String),
 }
-
-/// These are built-in "layer7" protocols for ZPR. These are treated specially by
-/// the compiler which knows how to create rules for them.  Users can use these
-/// when configuring their authentication services.
-pub const ZPR_OAUTH_RSA: &str = "zpr-oauthrsa";
-pub const ZPR_VALIDATION_2: &str = "zpr-validation2";
-
-pub const ZPR_L7_BUILTINS: [&str; 2] = [ZPR_OAUTH_RSA, ZPR_VALIDATION_2];
 
 #[derive(Debug, Clone, PartialEq, Copy, Eq, Hash)]
 pub enum IanaProtocol {
@@ -232,51 +219,6 @@ impl Protocol {
     }
     pub fn icmp6<S: Into<String>>(label: S, icmp: IcmpFlowType) -> IcmpProtocolBuilder {
         IcmpProtocolBuilder::new_icmp6(label.into(), icmp)
-    }
-
-    /// Create from a ZPR namespace protocol.
-    /// - `l7_protocol` is the layer 7 protocol name, eg "zpr-oauthrsa"
-    /// - `port` is an optional port specification. If not provided, the default port for the
-    ///   protocol will be used.
-    pub fn new_zpr_l7(
-        label: String,
-        l7_protocol: String,
-        port: Option<PortSpec>,
-    ) -> Result<Self, ProtocolError> {
-        let (prot, port_adj) = match l7_protocol.to_lowercase().as_str() {
-            ZPR_OAUTH_RSA => {
-                let pp = if let Some(ps) = port {
-                    vec![ps]
-                } else {
-                    vec![PortSpec::Single(zpl::ZPR_OAUTH_RSA_PORT_DEFAULT)]
-                };
-                (IanaProtocol::TCP, pp)
-            }
-            ZPR_VALIDATION_2 => {
-                let pp = if let Some(ps) = port {
-                    vec![ps]
-                } else {
-                    vec![PortSpec::Single(zpl::ZPR_VALIDATION2_PORT_DEFAULT)]
-                };
-                (IanaProtocol::TCP, pp)
-            }
-            _ => {
-                return Err(ProtocolError::InvalidL7ProtocolName(
-                    l7_protocol.to_string(),
-                ));
-            }
-        };
-        match prot {
-            IanaProtocol::TCP => Protocol::tcp(label)
-                .layer7(l7_protocol)
-                .add_ports(port_adj)
-                .build(),
-            IanaProtocol::UDP => Protocol::udp(label)
-                .layer7(l7_protocol)
-                .add_ports(port_adj)
-                .build(),
-            _ => unreachable!(),
-        }
     }
 
     /// Replace the portspec on this protocol.
@@ -617,18 +559,6 @@ mod test {
 
         // Layer 7 protocol shouldn't affect the endpoint string format
         assert_eq!(protocol.to_endpoint_str(), "TCP/443");
-    }
-
-    #[test]
-    fn test_to_endpoint_str_zpr_l7_protocol() {
-        let protocol = Protocol::new_zpr_l7(
-            "oauth".to_string(),
-            "zpr-oauthrsa".to_string(),
-            Some(PortSpec::Single(8443)),
-        )
-        .unwrap();
-
-        assert_eq!(protocol.to_endpoint_str(), "TCP/8443");
     }
 
     #[test]

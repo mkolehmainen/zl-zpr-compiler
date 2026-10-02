@@ -11,7 +11,7 @@ use crate::err_config;
 use crate::errors::CompilationError;
 use crate::zpl;
 
-use super::{AttrQueryTsConfig, OidcTsConfig, TrustedService, parse_provider};
+use super::{AttrQueryTsConfig, OidcTsConfig, TrustedService};
 
 fn warn_unknown_ts_property(ts: &Table, ctx: &CompilationCtx) -> Result<(), CompilationError> {
     // Property names recognized only when `api = "oidc"`. For every other api
@@ -494,8 +494,8 @@ fn parse_oidc_trusted_service(
 /// service the visa service queries over HTTPS (docs/ATTRIBUTE_SERVICE.md,
 /// "Declaring an attribute service in policy"). Like `file` it is a decorating
 /// store keyed on other services' identities, so `identity_attributes` is
-/// rejected; the BAS-era `validation/2` machinery (`provider`, `client`,
-/// `cert_path`, `prefix`) has no meaning here and is rejected too. Each
+/// rejected; the network-presence properties (`provider`, `client`,
+/// `cert_path`, `prefix`) have no meaning here and are rejected too. Each
 /// validation rule below has a dedicated unit test; the error text is the
 /// contract.
 fn parse_attr_query_trusted_service(
@@ -503,7 +503,7 @@ fn parse_attr_query_trusted_service(
     ts: &Table,
     expiration_seconds: u32,
 ) -> Result<TrustedService, CompilationError> {
-    // BAS-era and file-style properties that make no sense here.
+    // Properties that make no sense for an off-net attribute service.
     for forbidden in [
         "identity_attributes",
         "provider",
@@ -614,14 +614,18 @@ fn parse_attr_query_trusted_service(
     })
 }
 
-// Parse an individual trusted_service table.
+/// Parse an individual trusted_service table.
+///
+/// The builtin `default` service omits `api`. Every other service must declare
+/// one of the supported APIs: `file`, `oidc` or `zpr-attr/1`. Any other value
+/// is rejected here, so the weaver only ever sees those three.
 pub(super) fn parse_trusted_service(
     ts_id: &str,
     ts: &Table,
     ctx: &CompilationCtx,
 ) -> Result<TrustedService, CompilationError> {
     warn_unknown_ts_property(ts, ctx)?;
-    // The "api" value is optional for the default trusted service.
+    // The "api" value is omitted (only) for the default trusted service.
     let mut is_default = false;
     let api = if ts.contains_key("api") {
         ts["api"]
@@ -637,131 +641,86 @@ pub(super) fn parse_trusted_service(
 
     let expiration_seconds = parse_expiration_seconds(ts, ts_id, is_default)?;
 
-    if api == zpl::TS_API_FILE {
-        if is_default {
-            return Err(err_config!(
-                "default trusted_service cannot have api \"file\""
-            ));
-        }
-        return parse_file_trusted_service(ts_id, ts, expiration_seconds);
+    if is_default {
+        return parse_default_trusted_service(ts, ctx);
     }
 
-    if api == zpl::TS_API_OIDC {
-        // Guard on the id: `is_default` is only set when `api` is omitted,
-        // but the builtin default service must never be an OIDC provider.
-        if is_default || ts_id == zpl::DEFAULT_TRUSTED_SERVICE_ID {
-            return Err(err_config!(
-                "default trusted_service cannot have api \"oidc\""
-            ));
-        }
-        return parse_oidc_trusted_service(ts_id, ts, expiration_seconds, ctx);
+    // Guard on the id as well: `is_default` is only set when `api` is
+    // omitted, but the builtin default service must never take a declared API.
+    if ts_id == zpl::DEFAULT_TRUSTED_SERVICE_ID {
+        return Err(err_config!(
+            "default trusted_service cannot have api \"{}\"",
+            api
+        ));
     }
 
-    if api == zpl::TS_API_ATTR_QUERY {
-        // Same id guard as oidc: the builtin default service must never be
-        // an attribute service.
-        if is_default || ts_id == zpl::DEFAULT_TRUSTED_SERVICE_ID {
+    match api.as_str() {
+        zpl::TS_API_FILE => parse_file_trusted_service(ts_id, ts, expiration_seconds),
+        zpl::TS_API_OIDC => parse_oidc_trusted_service(ts_id, ts, expiration_seconds, ctx),
+        zpl::TS_API_ATTR_QUERY => parse_attr_query_trusted_service(ts_id, ts, expiration_seconds),
+        _ => Err(err_config!(
+            "trusted_service {} has unsupported api \"{}\" (expected \"{}\", \"{}\" or \"{}\")",
+            ts_id,
+            api,
+            zpl::TS_API_FILE,
+            zpl::TS_API_OIDC,
+            zpl::TS_API_ATTR_QUERY
+        )),
+    }
+}
+
+/// The builtin `default` trusted service is the visa service itself checking
+/// adapter certificates. Its only property is the optional `cert_path` of the
+/// CA that signs adapter certificates.
+fn parse_default_trusted_service(
+    ts: &Table,
+    ctx: &CompilationCtx,
+) -> Result<TrustedService, CompilationError> {
+    for forbidden in [
+        "returns_attributes",
+        "identity_attributes",
+        "provider",
+        "client",
+        "service",
+        "prefix",
+    ] {
+        if ts.contains_key(forbidden) {
             return Err(err_config!(
-                "default trusted_service cannot have api \"{}\"",
-                zpl::TS_API_ATTR_QUERY
+                "default trusted_service does not allow property '{}'",
+                forbidden
             ));
         }
-        return parse_attr_query_trusted_service(ts_id, ts, expiration_seconds);
     }
 
-    let cert_path = if ts.contains_key("cert_path") {
-        Some(PathBuf::from(ts["cert_path"].as_str().ok_or(
-            err_config!("trusted_service {} cert_path is not a string", ts_id),
-        )?))
-    } else if is_default {
-        // The path is the only thing required for the default section.
-        ctx.warn("no cert_path for default trusted_service, certificate checking disabled")?;
-        None
-    } else {
-        None
+    let cert_path = match ts.get("cert_path") {
+        Some(v) => Some(PathBuf::from(v.as_str().ok_or(err_config!(
+            "trusted_service {} cert_path is not a string",
+            zpl::DEFAULT_TRUSTED_SERVICE_ID
+        ))?)),
+        None => {
+            ctx.warn("no cert_path for default trusted_service, certificate checking disabled")?;
+            None
+        }
     };
 
-    let returns_raw: Vec<String>;
-    let identity_raw: Vec<String>;
-    let client_svc: Option<String>;
-    let service_svc: Option<String>;
-    if !is_default {
-        returns_raw = parse_string_array(ts, "returns_attributes", "trusted_service")?;
-        identity_raw = parse_string_array(ts, "identity_attributes", "trusted_service")?;
+    Ok(builtin_default_trusted_service(cert_path))
+}
 
-        if ts.contains_key("client") {
-            client_svc = Some(
-                ts["client"]
-                    .as_str()
-                    .ok_or(err_config!("trusted_service {} client parse error", ts_id))?
-                    .to_string(),
-            );
-        } else {
-            client_svc = Some(format!("{}-client", ts_id));
-        }
-        if ts.contains_key("service") {
-            service_svc = Some(
-                ts["service"]
-                    .as_str()
-                    .ok_or(err_config!("trusted_service {} service parse error", ts_id))?
-                    .to_string(),
-            );
-        } else {
-            service_svc = Some(format!("{}-vs", ts_id));
-        }
-    } else {
-        if ts.contains_key("returns_attributes") {
-            return Err(err_config!(
-                "default trusted_service does not allow custom returns_attributes"
-            ));
-        }
-        if ts.contains_key("identity_attributes") {
-            return Err(err_config!(
-                "default trusted_service does not allow custom identity_attributes"
-            ));
-        }
-        returns_raw = vec![format!("{} -> {}", zpl::KATTR_CN, zpl::KATTR_CN)];
-        identity_raw = vec![String::from(zpl::KATTR_CN)];
-        client_svc = None;
-        service_svc = None;
-    }
-
-    let returns_attrs = parse_return_mappings(ts_id, &returns_raw, is_default)?;
-
-    let mut identity_attrs = Vec::new();
-    for ra in &identity_raw {
-        // The ident attribute (for now) must exist in the returns attributes.
-        if !returns_attrs.iter().any(|m| &m.service_attr_key == ra) {
-            return Err(err_config!(
-                "trusted_service {} identity attribute '{}' not in returns_attributes",
-                ts_id,
-                ra
-            ));
-        }
-        identity_attrs.push(ra.to_string());
-    }
-
-    let provider = if ts.contains_key("provider") {
-        Some(parse_provider(&format!("trusted_service {ts_id}"), ts)?)
-    } else if !is_default {
-        return Err(err_config!("trusted_service {} missing provider", ts_id));
-    } else {
-        None
-    };
-
-    Ok(TrustedService {
-        id: ts_id.to_string(),
-        api,
-        expiration_seconds,
+/// The record for the builtin `default` trusted service: it vouches for the
+/// adapter CN (`device.zpr.adapter.cn`), which is also its identity attribute.
+/// Used both for a declared `[trusted_services.default]` and when the
+/// configuration omits it.
+pub(super) fn builtin_default_trusted_service(cert_path: Option<PathBuf>) -> TrustedService {
+    let cn_mapping = parse_attribute_mapping(&format!("{} -> {}", zpl::KATTR_CN, zpl::KATTR_CN))
+        .expect("the builtin adapter CN mapping must parse");
+    TrustedService {
+        id: zpl::DEFAULT_TRUSTED_SERVICE_ID.to_string(),
+        api: zpl::DEFAULT_TRUSTED_SERVICE_API.to_string(),
         cert_path,
-        returns_attrs,
-        identity_attrs,
-        provider,
-        client: client_svc,
-        service: service_svc,
-        oidc: None,
-        attr_query: None,
-    })
+        returns_attrs: vec![cn_mapping],
+        identity_attrs: vec![zpl::KATTR_CN.to_string()],
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
@@ -791,7 +750,6 @@ mod test {
         assert_eq!(ts.api, zpl::TS_API_FILE);
         assert_eq!(ts.expiration_seconds, 0);
         assert!(ts.identity_attrs.is_empty());
-        assert!(ts.provider.is_none());
         // declaration order preserved with exact trimmed RHS spelling
         let keys: Vec<&str> = ts
             .returns_attrs
@@ -990,6 +948,32 @@ mod test {
         assert_eq!(ts.returns_attrs[0].service_attr_key, zpl::KATTR_CN);
     }
 
+    /// The builtin default service takes only `cert_path`; network-service
+    /// properties are a configuration error rather than silently ignored.
+    #[test]
+    fn test_default_service_rejects_service_properties() {
+        for (prop, line) in [
+            (
+                "returns_attributes",
+                "returns_attributes = [\"a -> user.a\"]",
+            ),
+            ("identity_attributes", "identity_attributes = [\"a\"]"),
+            ("provider", "provider = [[\"foo\", \"bar\"]]"),
+            ("client", "client = \"c\""),
+            ("service", "service = \"s\""),
+            ("prefix", "prefix = \"p\""),
+        ] {
+            let t = body(&format!("cert_path = \"foo.pem\"\n{line}\n"));
+            let err = parse_trusted_service("default", &t, &CompilationCtx::default()).unwrap_err();
+            assert!(
+                err.to_string().contains(&format!(
+                    "default trusted_service does not allow property '{prop}'"
+                )),
+                "{prop}: {err}"
+            );
+        }
+    }
+
     #[test]
     fn test_expiration_on_default_rejected() {
         // id "default" with no api => builtin default; expiration is not allowed.
@@ -1005,7 +989,7 @@ mod test {
     #[test]
     fn test_validate_ts_id() {
         assert!(validate_ts_id("attrfile").is_ok());
-        assert!(validate_ts_id("bas-1_2").is_ok());
+        assert!(validate_ts_id("attr-1_2").is_ok());
         for bad in ["", "bad id", "a/b", "..", "café", "a.b"] {
             assert!(
                 validate_ts_id(bad).is_err(),
@@ -1051,9 +1035,7 @@ mod test {
         assert_eq!(ts.api, zpl::TS_API_OIDC);
         assert_eq!(ts.expiration_seconds, 3600);
         assert_eq!(ts.service.as_deref(), Some("google-jwks"));
-        assert!(ts.client.is_none());
         assert!(ts.cert_path.is_none());
-        assert!(ts.provider.is_none());
         assert_eq!(ts.identity_attrs, vec!["sub"]);
         let keys: Vec<&str> = ts
             .returns_attrs
@@ -1435,8 +1417,6 @@ mod test {
         assert_eq!(ts.api, zpl::TS_API_ATTR_QUERY);
         assert_eq!(ts.expiration_seconds, 3600);
         assert!(ts.identity_attrs.is_empty(), "no identity attributes");
-        assert!(ts.provider.is_none());
-        assert!(ts.client.is_none());
         assert!(ts.service.is_none());
         assert!(ts.oidc.is_none());
         let aq = ts.attr_query.as_ref().expect("attr_query config present");

@@ -512,7 +512,7 @@ mod test {
     "#;
 
     // Includes a trusted service
-    const BAS_CONFIG: &str = r#"
+    const TS_CONFIG: &str = r#"
     [nodes.n0]
     key = "none"
     zpr_address = "fd5a:5052:90de::1"
@@ -526,13 +526,9 @@ mod test {
     [trusted_services.default]
     cert_path = ""
 
-    [trusted_services.bas]
-    api = "validation/2"
-    client = "AuthService"
-    cert_path = ""
-    returns_attributes = [ "color -> user.color", "content -> service.content", "bas_id -> user.bas_id" ]
-    identity_attributes = [ "bas_id" ]
-    provider = [[ "device.zpr.adapter.cn", "bas.zpr.org" ]]
+    [trusted_services.attrs]
+    api = "file"
+    returns_attributes = [ "color -> user.color", "content -> service.content", "uid -> user.uid" ]
 
 
     [protocols.http]
@@ -541,12 +537,6 @@ mod test {
 
     [services.Webby]
     protocol = "http"
-
-    [services.bas-vs]
-    protocol = "zpr-validation2"
-
-    [services.AuthService]
-    protocol = "zpr-oauthrsa"
     "#;
 
     #[test]
@@ -747,7 +737,7 @@ mod test {
     #[test]
     fn test_service_attributes() {
         let zpl = r#"
-        define Webby as a service with user.bas_id:100.
+        define Webby as a service with user.uid:100.
         allow color:green users to access content:green services.
         allow color:brown users to access content:brown services.
         allow color:red users to access Webby.
@@ -758,7 +748,7 @@ mod test {
         std::fs::write(&zpl_file, zpl).expect("failed to write zpl file");
 
         let cfg_file = tempdir.path.join("test.zplc");
-        std::fs::write(&cfg_file, BAS_CONFIG).expect("failed to write config file");
+        std::fs::write(&cfg_file, TS_CONFIG).expect("failed to write config file");
 
         let mut compilation = Compilation::builder(zpl_file)
             .config(&cfg_file)

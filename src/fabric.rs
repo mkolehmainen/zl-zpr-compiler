@@ -28,12 +28,10 @@ pub struct Fabric {
 pub struct FabricService {
     pub config_id: String, // Service name as specified in configuration and ZPL.
     pub fabric_id: String, // Service name assigned in the fabric
-    pub protocol: Option<Protocol>, // For an auth service this is the visa-service facing protocol.
+    pub protocol: Option<Protocol>, // None for trusted services: none has a ZPR network presence.
     pub provider_attrs: Vec<Attribute>, // Set of provider attributes required to offer the service
     pub client_policies: Vec<ClientPolicy>, // List of consumer policies
     pub service_type: ServiceType,
-    pub certificate: Option<Vec<u8>>, // Certificate for this (trusted) service
-    pub client_service_name: Option<String>, // For an AUTH service, the name of the optional client service.
     pub trusted_service: Option<TrustedService>, // Shared metadata record -- only for trusted services
 }
 
@@ -42,10 +40,7 @@ pub struct FabricService {
 pub struct TrustedServiceSpec {
     pub id: String,
     pub api: String,
-    pub protocol: Option<Protocol>,
     pub provider_attrs: Vec<Attribute>,
-    pub certificate: Option<Vec<u8>>,
-    pub client_service_name: Option<String>,
     pub returns_attrs: Vec<AttrMapping>,
     pub identity_attrs: Vec<String>,
     pub expiration_seconds: u32,
@@ -178,7 +173,6 @@ impl fmt::Display for Fabric {
             match s.service_type {
                 ServiceType::Trusted(ref api) => {
                     writeln!(f, "    API: {}", api)?;
-                    writeln!(f, "    client-service: {:?}", s.client_service_name)?;
                 }
                 _ => {}
             }
@@ -289,12 +283,10 @@ impl Fabric {
         let fs = FabricService {
             config_id: spec.id.clone(),
             fabric_id: spec.id.clone(),
-            protocol: spec.protocol,
+            protocol: None,
             provider_attrs: spec.provider_attrs,
             client_policies: Vec::new(),
             service_type: ServiceType::Trusted(spec.api),
-            certificate: spec.certificate,
-            client_service_name: spec.client_service_name,
             trusted_service: Some(TrustedService {
                 service_id: spec.id,
                 expiration_seconds: spec.expiration_seconds,
@@ -366,8 +358,6 @@ impl Fabric {
             provider_attrs: attrs.to_vec(),
             client_policies: Vec::new(),
             service_type: stype,
-            certificate: None,
-            client_service_name: None,
             trusted_service: None,
         };
         self.services.push(fs);
@@ -413,8 +403,6 @@ impl Fabric {
             provider_attrs: attrs.to_vec(),
             client_policies: Vec::new(),
             service_type: ServiceType::BuiltIn,
-            certificate: None,
-            client_service_name: None,
             trusted_service: None,
         };
         self.services.push(fs);

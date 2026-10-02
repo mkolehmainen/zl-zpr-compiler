@@ -322,14 +322,14 @@ fn test_file_trusted_service_end_to_end() {
     .unwrap();
     let policy = rdr.get_root::<policy_capnp::policy::Reader>().unwrap();
 
-    // --- trustedServices: deterministic order, bas + attrfile once each ---
+    // --- trustedServices: deterministic order, attrfile + attrs once each ---
     assert!(
         policy.has_trusted_services(),
         "policy must have trustedServices"
     );
     let records = decode_records(&policy);
     let ids: Vec<&str> = records.iter().map(|r| r.service_id.as_str()).collect();
-    assert_eq!(ids, vec!["attrfile", "bas"]);
+    assert_eq!(ids, vec!["attrfile", "attrs"]);
 
     // attrfile: expiration 3600, TOML-ordered mappings, empty identity.
     let attrfile = records.iter().find(|r| r.service_id == "attrfile").unwrap();
@@ -340,10 +340,10 @@ fn test_file_trusted_service_end_to_end() {
         vec![("hair_color", "user.hair_color"), ("lazy", "#user.lazy")]
     );
 
-    // bas validation/2 record retained (default expiration + identity preserved).
-    let bas = records.iter().find(|r| r.service_id == "bas").unwrap();
-    assert_eq!(bas.expiration_seconds, 0);
-    assert_eq!(bas.identity_attrs, vec!["bas_id".to_string()]);
+    // attrs: default expiration, no identity attributes.
+    let attrs = records.iter().find(|r| r.service_id == "attrs").unwrap();
+    assert_eq!(attrs.expiration_seconds, 0);
+    assert!(attrs.identity_attrs.is_empty());
 
     // --- attrfile join Service: Trusted("file"), zero endpoints, selected by cn = vs.zpr ---
     let mut attrfile_svc_found = false;
@@ -403,12 +403,6 @@ fn test_file_trusted_service_end_to_end() {
             );
         }
     }
-
-    // --- validation/2 (bas) service unchanged: retains its real endpoint ---
-    assert!(
-        trusted_service_endpoint_count(&policy, "bas", "validation/2") > 0,
-        "validation/2 service must retain its endpoint"
-    );
 }
 
 // ---- zipline#23: identity vendors are never pruned ----
@@ -549,55 +543,6 @@ fn test_referenced_and_vs_interpreted_vendor_woven_once() {
         vec!["dualstore"],
         "dualstore must be woven exactly once"
     );
-}
-
-#[test]
-fn test_validation2_regression() {
-    // test-bas is validation/2-only; the sole new artifact is the `bas` trustedServices record.
-    // Its join/communication policies must be unchanged by the feature.
-    let temp = TempDir::new("val2-regression");
-    let pbytes = compile_policy_bytes("test-bas", &temp);
-    let rdr = capnp::serialize::read_message(
-        &mut Cursor::new(pbytes.as_slice()),
-        capnp::message::ReaderOptions::new(),
-    )
-    .unwrap();
-    let policy = rdr.get_root::<policy_capnp::policy::Reader>().unwrap();
-
-    // Exactly one record — the validation/2 `bas` service — with its mappings intact.
-    let records = decode_records(&policy);
-    let ids: Vec<&str> = records.iter().map(|r| r.service_id.as_str()).collect();
-    assert_eq!(
-        ids,
-        vec!["bas"],
-        "only the validation/2 record should be emitted"
-    );
-    let bas = &records[0];
-    assert_eq!(bas.expiration_seconds, 0);
-    assert_eq!(bas.identity_attrs, vec!["bas_id".to_string()]);
-    assert_eq!(
-        mappings(bas),
-        vec![
-            ("tint", "device.tint"),
-            ("color", "user.color"),
-            ("government", "#user.government"),
-            ("govpc", "#device.government"),
-            ("clearance", "user.clearance"),
-            ("classified", "#service.classified"),
-            ("roles", "user.role{}"),
-            ("bas_id", "user.bas_id"),
-        ]
-    );
-
-    // Join policy for bas still carries its real validation/2 endpoint.
-    assert!(
-        trusted_service_endpoint_count(&policy, "bas", "validation/2") > 0,
-        "validation/2 endpoint missing"
-    );
-
-    // Communication policies are still emitted (join/comm behavior unchanged).
-    assert!(policy.has_com_policies());
-    assert!(policy.get_com_policies().unwrap().len() > 0);
 }
 
 // ---- deterministic bin2 ordering ----
@@ -1645,13 +1590,6 @@ fn test_zpr_addr_pin_in_node_provider_rejected() {
 }
 
 #[test]
-fn test_zpr_addr_pin_in_trusted_service_provider_rejected() {
-    let temp = TempDir::new("zpr-addr-ts");
-    let msg = compile_expect_err("bad-zpr-addr-trusted-service", &temp);
-    assert_zpr_addr_pin_rejected(&msg);
-}
-
-#[test]
 fn test_zpr_addr_pin_in_oidc_proxy_provider_rejected() {
     let temp = TempDir::new("zpr-addr-oidc-proxy");
     let msg = compile_expect_err("bad-zpr-addr-oidc-proxy", &temp);
@@ -1666,15 +1604,6 @@ fn test_zpr_addr_pin_in_unreferenced_service_provider_rejected() {
     // the rejection must be eager, at config parse time.
     let temp = TempDir::new("zpr-addr-unref-service");
     let msg = compile_expect_err("bad-zpr-addr-unref-service", &temp);
-    assert_zpr_addr_pin_rejected(&msg);
-}
-
-#[test]
-fn test_zpr_addr_pin_in_unreferenced_trusted_service_provider_rejected() {
-    // Same eager-rejection contract for a trusted service the ZPL never
-    // consults: inactive providers must not smuggle a pin past the check.
-    let temp = TempDir::new("zpr-addr-unref-ts");
-    let msg = compile_expect_err("bad-zpr-addr-unref-trusted-service", &temp);
     assert_zpr_addr_pin_rejected(&msg);
 }
 

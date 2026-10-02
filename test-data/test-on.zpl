@@ -31,9 +31,5 @@ define ServiceRequiresEncrypted as an Image-database with tag device.encrypted.
 allow clearance:public users to access ServiceRequiresEncrypted.
 
 
-define AuthService as a service.
-
-# Here is an device clause without ON since there is no user clause.
-allow zpr.adapter.cn: devices to access AuthService.
 define NetAdmins as users with device.zpr.adapter.cn:'admin.zpr.org'.
 allow NetAdmins to access VisaService.
