@@ -33,20 +33,16 @@ peers = [{node="n1"}, {node="n2"}]
 attributes = [["zpr.cost", "10"], ["location", "us"]]
 peers = [{node="n0"}, {node="n1"}]
 
-[trusted_services.bas]
-api = "validation/2"
-client = "AuthService"
-cert_path = "bas-tls.crt"
+[trusted_services.attrs]
+api = "file"
 returns_attributes = [
   "tint -> device.tint",
   "color -> user.color",
   "government -> #user.government",
   "clearance -> user.clearance",
   "classified -> #service.classified",
-  "bas_id -> user.bas_id"
+  "uid -> user.uid"
 ]
-identity_attributes = [ "bas_id" ]
-provider = [[ "device.zpr.adapter.cn", "bas.zpr.org" ]]
 
 [trusted_services.attrfile]
 api = "file"
@@ -55,7 +51,6 @@ expiration_seconds = 3600
 
 [bootstrap]
 "node2.zpr.org" = "rsa-pub-key.pem"
-"bas.zpr.org" = "rsa-pub-key.pem"
 "node0.zpr.org" = "rsa-pub-key.pem"
 "node1.zpr.org" = "rsa-pub-key.pem"
 
@@ -74,11 +69,3 @@ port = "80, 100-150, 444"
 [services.gateway]
 protocol = "http"
 port = "80, 443"
-
-[services.bas-vs]
-protocol = "zpr-validation2"
-port = 3999
-
-[services.AuthService]
-protocol = "zpr-oauthrsa"
-port = 4444

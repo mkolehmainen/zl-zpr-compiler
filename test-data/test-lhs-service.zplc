@@ -4,9 +4,8 @@
 provider = [["device.zpr.adapter.cn", "fee"]]
 zpr_address = "fd5a:5052:90de::1"
 
-[trusted_services.foo]
-prefix = "foo"
-api = "validation/2"
+[trusted_services.attrs]
+api = "file"
 returns_attributes = [
   "red -> #service.red", 
   "blue -> #service.blue", 
@@ -14,7 +13,6 @@ returns_attributes = [
   "green -> #user.green", 
   "yellow -> #device.yellow", 
   "orange -> #device.orange" ]
-provider = [["device.zpr.adapter.cn", "foo"]]
 
 [protocols.http]
 l4protocol = "TCP"
@@ -24,11 +22,6 @@ port = 80
 l4protocol = "TCP"
 port = 9012
 
-[services.foo-client]
-protocol = "zpr-oauthrsa"
-
-[services.foo-vs]
-protocol = "zpr-validation2"
 
 [services.MyWeb]
 protocol = "http"

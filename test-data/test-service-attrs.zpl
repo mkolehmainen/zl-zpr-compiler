@@ -2,13 +2,13 @@
 
 
 
-define WebService as a service with user.bas_id:1234.
+define WebService as a service with user.uid:1234.
 
 allow color:green users to access content:green services.
 allow color:brown users to access content:brown services.
 allow color:red users to access WebService.
 
-define FooService as a service with user.bas_id:4567.
+define FooService as a service with user.uid:4567.
 allow color:green users to access content:green FooServices.
 allow color:purple users to access FooServices.
 
@@ -16,9 +16,9 @@ allow color:purple users to access FooServices.
 # What we expect:
 #
 # CONNECT:
-#   user.bas_id:1234 then advertise WebService
-#   user.bas_id:4567 then advertise FooService
-#   user.bas_id:4567 && service.content:green then advertise FooService#1
+#   user.uid:1234 then advertise WebService
+#   user.uid:4567 then advertise FooService
+#   user.uid:4567 && service.content:green then advertise FooService#1
 #   user.color:green OK
 #   user.color:brown OK
 #   user.color:red OK

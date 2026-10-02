@@ -81,7 +81,7 @@ impl<T: PolicyWriter> PolicyBuilder<T> {
     ///   - The set of communication policies which set which agents can access which services.
     ///   - The links which are empty for now as only a single node is supported (TODO).
     ///   - The services which is only used for AUTH services.
-    ///   - The certificates used for trusted services and for the default/internal auth service.
+    ///   - The certificate used for the default/internal auth service.
     ///
     /// This does most of the work in building the policy.
     pub fn with_fabric(
@@ -130,13 +130,9 @@ impl<T: PolicyWriter> PolicyBuilder<T> {
         Ok(())
     }
 
-    /// Emit one shared `TrustedService` metadata record per woven `file` or
-    /// `validation/2` service. There is no record for the builtin `default`
-    /// service (it is not a fabric `Trusted` service) nor for the validation/2
-    /// adapter-facing authentication service (it is tied to its vs-facing
-    /// `validation/2` service which does get a record). Validation/2 network
-    /// join/communication policies are also emitted through the normal fabric
-    /// paths (`set_connects`/`set_policies`).
+    /// Emit one shared `TrustedService` metadata record per woven `file`,
+    /// `oidc` or `zpr-attr/1` service. There is no record for the builtin
+    /// `default` service (it is not a fabric `Trusted` service).
     fn set_trusted_service_records(
         &mut self,
         fabric: &Fabric,
@@ -256,31 +252,16 @@ impl<T: PolicyWriter> PolicyBuilder<T> {
                     )
                 }
 
-                ServiceType::Trusted(ref api) => {
-                    // Only trusted services with no network presence (`file`,
-                    // `oidc`, `zpr-attr/1`) may have no protocol; all
-                    // network-facing services must carry one.
-                    if svc.protocol.is_none()
-                        && api != zpl::TS_API_FILE
-                        && api != zpl::TS_API_OIDC
-                        && api != zpl::TS_API_ATTR_QUERY
-                    {
-                        return Err(CompilationError::BuildError(format!(
-                            "trusted service {} of type '{}' is missing a protocol",
-                            svc.fabric_id, api
-                        )));
-                    }
+                ServiceType::Trusted(_) => {
+                    // No trusted service (`file`, `oidc`, `zpr-attr/1`) has a
+                    // ZPR network presence, so none carries a protocol.
                     self.policy_writer.write_connect_match_for_provider(
                         &svc.provider_attrs,
                         &svc.fabric_id,
                         &svc.service_type,
-                        svc.protocol.as_ref(),
+                        None,
                         None,
                     );
-                    if let Some(cert_data) = &svc.certificate {
-                        self.policy_writer
-                            .write_service_cert(&svc.fabric_id, cert_data);
-                    };
                 }
                 ServiceType::Undefined => {
                     panic!("undefined service type in fabric{}", svc.config_id);

@@ -1,5 +1,5 @@
 # api = "oidc" trusted service fixture (zipline#6).
-# Derived from test-file.zpl with the BAS-dependent statements removed:
+# Derived from test-file.zpl with the statements needing other attribute stores removed:
 # the only declared trusted service is the off-net OIDC provider `google`,
 # so every attribute here resolves through it or the default service.
 

@@ -15,7 +15,6 @@ provider = [ ["zpr.adapter.cn", "node.zpr.org"]]
 zpr_address = "node0.zpr"
 
 [bootstrap]
-"bas.zpr.org" = "rsa-pub-key.pem"
 "vs.zpr" = "vs.zpr_pub-key.pem"
 
 [trusted_services.default] # note that "default" is special
@@ -37,7 +36,3 @@ protocol = "ping"
 
 [services.ZWebService]
 protocol = "http"
-
-
-
-

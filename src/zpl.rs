@@ -17,10 +17,12 @@ pub const DEF_CLASS_LINK_NAME: &str = "link";
 pub const DEF_CLASS_LINK_PLURAL: &str = "links";
 
 pub const DEFAULT_TRUSTED_SERVICE_ID: &str = "default";
-pub const DEFAULT_TRUSTED_SERVICE_API: &str = TS_API_V1;
+/// The `api` the builtin `default` trusted service carries internally. It is
+/// never written by a policy author and never woven into the policy: the
+/// default service is the visa service itself checking adapter certificates.
+pub const DEFAULT_TRUSTED_SERVICE_API: &str = "default";
 
-pub const TS_API_V1: &str = "validation/1";
-pub const TS_API_V2: &str = "validation/2";
+/// The `api` values a non-default trusted service may declare.
 pub const TS_API_FILE: &str = "file";
 pub const TS_API_OIDC: &str = "oidc";
 /// Networked attribute service speaking the `zpr-attr/1` wire API
@@ -99,9 +101,3 @@ pub const VISA_SERVICE_ADMIN_PORT: u16 = 8182; // TCP
 
 // Only known config setting (see policy.proto)
 pub const CONFIG_KEY_MAX_VISA_LIFETIME: u32 = 1; // value is time in seconds
-
-// client (eg, adapter) facing
-pub const ZPR_OAUTH_RSA_PORT_DEFAULT: u16 = 4000;
-
-// visa service facing
-pub const ZPR_VALIDATION2_PORT_DEFAULT: u16 = 3999;

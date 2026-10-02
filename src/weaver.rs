@@ -16,7 +16,7 @@ use crate::fabric::{
     Fabric, FabricLink, FabricNode, NodeLinkAddr, PLine, SubstrateAddr, TrustedServiceSpec,
 };
 use crate::fabric_util::{squash_attributes, vec_to_attributes, vec_to_attributes_in_domain};
-use crate::protocols::{PortSpec, Protocol, ZPR_OAUTH_RSA, ZPR_VALIDATION_2};
+use crate::protocols::{PortSpec, Protocol};
 use crate::ptypes::{AllowClause, Class, ClassFlavor, FPos, Policy};
 use crate::zpl;
 
@@ -368,7 +368,7 @@ impl Weaver {
         };
 
         // service must have a protocol
-        let mut prot = match config.get(&format!("/services/{}/protocol", matched_service_name)) {
+        let prot = match config.get(&format!("/services/{}/protocol", matched_service_name)) {
             Some(citem) => match &citem {
                 ConfigItem::Protocol(_, _, _) => citem.try_into_protocol()?,
                 _ => {
@@ -385,39 +385,6 @@ impl Weaver {
             }
         };
 
-        // This service may be an adapter facing authentication service.
-        let mut svc_type = ServiceType::Regular;
-        match config.get("/trusted_services") {
-            Some(ConfigItem::KeySet(ts_names)) => {
-                for nam in ts_names {
-                    match config.get(&format!("/trusted_services/{nam}/client_service")) {
-                        Some(ConfigItem::StrVal(cs_name)) if cs_name == matched_service_name => {
-                            svc_type = ServiceType::Authentication;
-
-                            // Also this service is actually provided by the trusted service, so:
-                            let ts_provider_attrs =
-                                match config.get(&format!("/trusted_services/{nam}/provider")) {
-                                    Some(ConfigItem::AttrList(attrs)) => vec_to_attributes(&attrs)?,
-                                    _ => {
-                                        return Err(CompilationError::ConfigError(format!(
-                                            "trusted service {nam} missing provider attributes",
-                                        )));
-                                    }
-                                };
-                            attrs.extend_from_slice(&ts_provider_attrs);
-
-                            // And also has a special protocol layer 7 designation:
-                            // TODO: Really should come from config api.
-                            prot.set_layer7(ZPR_OAUTH_RSA.to_string());
-                            break;
-                        }
-                        _ => (),
-                    }
-                }
-            }
-            _ => (),
-        };
-
         let attr_map = squash_attributes(&attrs, &sclass.pos)?;
         let resolved_attrs = self.resolve_attributes(
             attr_map
@@ -427,16 +394,19 @@ impl Weaver {
             config,
         )?;
 
-        if svc_type == ServiceType::Regular && resolved_attrs.is_empty() {
+        if resolved_attrs.is_empty() {
             return Err(CompilationError::ConfigError(format!(
                 "service with no attributes: '{}'",
                 matched_service_name
             )));
         }
 
-        let fabric_svc_id =
-            self.fabric
-                .add_service(&matched_service_name, &prot, &resolved_attrs, svc_type)?;
+        let fabric_svc_id = self.fabric.add_service(
+            &matched_service_name,
+            &prot,
+            &resolved_attrs,
+            ServiceType::Regular,
+        )?;
         self.wctx.map_allow_id_to_fabric_id(svc_id, fabric_svc_id);
         Ok(())
     }
@@ -1174,10 +1144,10 @@ impl Weaver {
         Ok(())
     }
 
-    /// Check that the providers of trusted services are expressed using attributes that
-    /// we know the source of.  This may add to the list of active trusted services --
-    /// since it's possible that some trusted services are only used when defining other
-    /// trusted services.
+    /// Resolve the provider attributes of every on-net service a used trusted service
+    /// depends on (today only an `oidc` service's JWKS proxy). This may add to the list
+    /// of active trusted services -- since it's possible that some trusted services are
+    /// only used when defining the providers of other trusted services.
     fn resolve_trusted_service_providers(
         &mut self,
         config: &ConfigApi,
@@ -1196,51 +1166,31 @@ impl Weaver {
                 }
                 checked_services.insert(ts_name.clone());
 
-                // A `file` service is offered by the Visa Service itself and has no provider
-                // attributes to resolve. An `oidc` provider is off-net; the VS is likewise
-                // its sole (implicit) provider. A `zpr-attr/1` attribute service is off-net
-                // too, reached over ordinary IP (its `service` property is reserved).
+                // No trusted service has provider attributes of its own: a `file` service is
+                // offered by the Visa Service itself, and `oidc` and `zpr-attr/1` services are
+                // off-net. The only on-net dependency is an `oidc` declaration's optional JWKS
+                // proxy `service`; that service's provider attributes take part in the
+                // dependency closure like any other provider attributes, otherwise a trusted
+                // service used only by the proxy provider is discovered after this closure is
+                // snapshotted and never woven. Existence/shape errors are deferred to
+                // add_oidc_trusted_service, which reports them with context.
                 let ts_api = config
                     .must_get(&format!("/trusted_services/{ts_name}/api"))
                     .to_string();
-                if ts_api == zpl::TS_API_FILE
-                    || ts_api == zpl::TS_API_OIDC
-                    || ts_api == zpl::TS_API_ATTR_QUERY
-                {
-                    // An oidc declaration may name an on-net JWKS proxy in
-                    // `service`; that service's provider attributes take part in
-                    // the dependency closure like any other provider attributes,
-                    // otherwise a trusted service used only by the proxy provider
-                    // is discovered after this closure is snapshotted and never
-                    // woven. Existence/shape errors are deferred to
-                    // add_oidc_trusted_service, which reports them with context.
-                    if ts_api == zpl::TS_API_OIDC {
-                        if let Some(ConfigItem::StrVal(name)) =
-                            config.get(&format!("/trusted_services/{ts_name}/vs_service"))
-                        {
-                            if let Some(ConfigItem::AttrList(alist)) =
-                                config.get(&format!("/services/{name}/provider"))
-                            {
-                                let proxy_provider_attrs = vec_to_attributes(&alist)?;
-                                let _ = self.resolve_attributes(&proxy_provider_attrs, config)?;
-                            }
-                        }
-                    }
+                if ts_api != zpl::TS_API_OIDC {
                     continue;
                 }
-
-                let ts_provider_attrs =
-                    match config.get(&format!("/trusted_services/{ts_name}/provider")) {
-                        Some(ConfigItem::AttrList(attrs)) => vec_to_attributes(&attrs)?,
-                        _ => {
-                            return Err(CompilationError::ConfigError(format!(
-                                "trusted service {ts_name} missing provider attributes",
-                            )));
-                        }
-                    };
-
-                // Call resolve which may add to the list of active trusted services.
-                let _ = self.resolve_attributes(&ts_provider_attrs, config)?;
+                if let Some(ConfigItem::StrVal(name)) =
+                    config.get(&format!("/trusted_services/{ts_name}/vs_service"))
+                {
+                    if let Some(ConfigItem::AttrList(alist)) =
+                        config.get(&format!("/services/{name}/provider"))
+                    {
+                        let proxy_provider_attrs = vec_to_attributes(&alist)?;
+                        // Call resolve which may add to the list of active trusted services.
+                        let _ = self.resolve_attributes(&proxy_provider_attrs, config)?;
+                    }
+                }
             }
             if self.wctx.used_trusted_services.len() == active_set_count {
                 break; // no change? We are done.
@@ -1256,17 +1206,14 @@ impl Weaver {
     /// for every attribute store in the policy -- a `file` store's JSON is keyed by
     /// identity attribute and value -- so whether ZPL references *its own* returned
     /// attributes says nothing about whether the visa service needs it. Only `oidc`
-    /// and `validation/2` can reach this rule: the config parser rejects
-    /// `identity_attributes` on `api = "file"` and on the default service. Identity
+    /// can reach this rule: the config parser rejects `identity_attributes` on
+    /// `api = "file"`, on `api = "zpr-attr/1"` and on the default service. Identity
     /// vendors are never pruned; attribute overlays still are.
     ///
-    /// Known trade-off: a `validation/2` service that declares `identity_attributes`
-    /// and is genuinely dead now gets woven, giving the visa service a network
-    /// dependency it previously pruned. This is the price of the rule and it is the
-    /// right price: the compiler cannot see a file store's JSON keys, so it cannot
-    /// prove an identity vendor is unused. The `ctx.info()` line makes each such
-    /// retention visible at build time (`info`, not `warn` -- for `oidc` this is the
-    /// normal case and must not trip `--Werror`).
+    /// The compiler cannot see a file store's JSON keys, so it cannot prove an
+    /// identity vendor is unused. The `ctx.info()` line makes each such retention
+    /// visible at build time (`info`, not `warn` -- for `oidc` this is the normal
+    /// case and must not trip `--Werror`).
     fn retain_identity_vendors(&mut self, config: &ConfigApi, ctx: &CompilationCtx) {
         let mut ts_names = config.must_get_keys("/trusted_services");
         ts_names.sort(); // deterministic diagnostics
@@ -1297,7 +1244,7 @@ impl Weaver {
     /// no error, and the deployment silently misbehaves: the device comes up on
     /// a pool address instead of its static grant, or the DNS hosts index stays
     /// empty. Any trusted-service API qualifies (`file`, `zpr-attr/1`,
-    /// `validation/2`, `oidc`), because any declared service may grant.
+    /// `oidc`), because any declared service may grant.
     ///
     /// Known trade-off, accepted in zipline#105: an unused networked store that
     /// happens to vend one of these attributes is now woven, giving the visa
@@ -1340,8 +1287,8 @@ impl Weaver {
         ctx: &CompilationCtx,
     ) -> Result<(), CompilationError> {
         // Identity vendors are retained before the provider fixpoint runs, so a
-        // retained service's own provider attributes (a `validation/2` identity
-        // vendor; an `oidc` JWKS proxy) still resolve through it.
+        // retained `oidc` service's JWKS proxy provider attributes still resolve
+        // through it.
         self.retain_identity_vendors(config, ctx);
         // Same ordering argument for vendors of visa-service-interpreted
         // attributes (zipline#105): retain before the provider fixpoint so a
@@ -1424,88 +1371,10 @@ impl Weaver {
                 continue;
             }
 
-            let client_svc = config
-                .must_get(&format!("/trusted_services/{ts_name}/client_service"))
-                .to_string();
-            let vs_svc = config
-                .must_get(&format!("/trusted_services/{ts_name}/vs_service"))
-                .to_string();
-            let ts_cert = match config.get(&format!("/trusted_services/{ts_name}/certificate")) {
-                Some(ConfigItem::BytesB64(b64data)) => match BASE64_STANDARD.decode(b64data) {
-                    Ok(cert_data) => Some(cert_data),
-                    Err(e) => {
-                        return Err(CompilationError::ConfigError(format!(
-                            "error decoding certificate data: {}",
-                            e
-                        )));
-                    }
-                },
-                _ => None,
-            };
-            let ts_provider_attrs =
-                match config.get(&format!("/trusted_services/{ts_name}/provider")) {
-                    Some(ConfigItem::AttrList(attrs)) => vec_to_attributes(&attrs)?,
-                    _ => {
-                        return Err(CompilationError::ConfigError(format!(
-                            "trusted service {ts_name} missing provider attributes",
-                        )));
-                    }
-                };
-
-            let vs_svc_protocol =
-                self.check_ts_components(config, ctx, &ts_name, &client_svc, &vs_svc, &ts_api)?;
-
-            // The trusted service may return some identity attributes.
-            let ts_identity_attrs =
-                match config.get(&format!("/trusted_services/{ts_name}/id_attributes")) {
-                    Some(ConfigItem::KeySet(attrs)) => attrs,
-                    _ => Vec::new(),
-                };
-
-            if vs_svc_protocol.is_none() {
-                return Err(CompilationError::ConfigError(format!(
-                    "trusted service {} missing visa service facing service protocol",
-                    ts_name
-                )));
-            }
-            self.fabric
-                .add_trusted_service(TrustedServiceSpec {
-                    id: ts_name.clone(),
-                    api: ts_api.clone(),
-                    protocol: Some(vs_svc_protocol.unwrap()),
-                    provider_attrs: ts_provider_attrs,
-                    certificate: ts_cert,
-                    client_service_name: Some(client_svc),
-                    returns_attrs: ts_returns_attrs,
-                    identity_attrs: ts_identity_attrs,
-                    expiration_seconds,
-                    oidc: None,
-                    attr_query: None,
-                })
-                .map_err(|e| {
-                    CompilationError::ConfigError(format!("error adding trusted service: {}", e))
-                })?;
-
-            // The visa service can access the trusted service over its vs interface.
-            let cn_attr = Attribute::tuple(zpl::KATTR_CN)
-                .single()
-                .value(zpl::VISA_SERVICE_CN)
-                .build()?;
-            let vs_access_attrs = vec![cn_attr];
-            let pline = PLine::new_builtin(&format!(
-                "allow visa service access to trusted service {}",
-                ts_name
-            ));
-            self.fabric.add_condition_to_service(
-                false,
-                &ts_name,
-                &vs_access_attrs,
-                &[],
-                &[], // no link constraints on the trusted service policy
-                true,
-                None,
-                &pline,
-            )?;
+            // The config parser rejects every other API.
+            return Err(CompilationError::BuildError(format!(
+                "trusted service {ts_name} has unsupported api {ts_api}"
+            )));
         }
         Ok(())
     }
@@ -1594,7 +1463,7 @@ impl Weaver {
 
         // An oidc trusted service has no on-net service on either side, so a
         // conventionally-named [services.<id>*] block that is not the declared
-        // proxy is a leftover from a validation/2-style setup. Fail loudly.
+        // proxy is a configuration mistake. Fail loudly.
         for name in [
             ts_name.to_string(),
             format!("{ts_name}-vs"),
@@ -1709,8 +1578,8 @@ impl Weaver {
         expiration_seconds: u32,
     ) -> Result<(), CompilationError> {
         // An attribute service has no on-net service on either side, so a
-        // conventionally-named [services.<id>*] block is a leftover from a
-        // validation/2-style setup. Fail loudly.
+        // conventionally-named [services.<id>*] block is a configuration
+        // mistake. Fail loudly.
         for name in [
             ts_name.to_string(),
             format!("{ts_name}-vs"),
@@ -1792,79 +1661,6 @@ impl Weaver {
     /// Check the details around the two components of a trusted service: the visa-facing and the
     /// actor/adapter facing.
     ///
-    /// Returns the protocol for the visa-facing component of the trusted service (if found).
-    ///
-    /// `vs_svc` - the visa service facing service name.
-    /// `client_svc` - the actor/adapter facing service name.
-    fn check_ts_components(
-        &self,
-        config: &ConfigApi,
-        ctx: &CompilationCtx,
-        ts_name: &str,
-        client_svc: &str,
-        vs_svc: &str,
-        ts_api: &str,
-    ) -> Result<Option<Protocol>, CompilationError> {
-        let mut vs_svc_protocol: Option<Protocol> = None;
-        for svc_name in [client_svc, vs_svc] {
-            if self.fabric.has_service(svc_name) {
-                if svc_name == vs_svc {
-                    return Err(CompilationError::BuildError(format!(
-                        "VS facing service for {ts_name} already exists: {vs_svc}"
-                    )));
-                }
-            } else if svc_name == client_svc {
-                // This implies that there is no ZPL allowing access to the client facing
-                // authentication service.  Warn user.
-                // TODO: This is actually perfectly fine if the service only supports query.
-                ctx.warn(&format!(
-                    "no ZPL policy allowing access to client authentication service {}",
-                    client_svc
-                ))?;
-                continue;
-            }
-            // service must have a protocol
-            let prot = match config.get(&format!("/services/{svc_name}/protocol")) {
-                Some(citem) => match &citem {
-                    ConfigItem::Protocol(_, _, _) => citem.try_into_protocol()?,
-                    _ => {
-                        return Err(CompilationError::ConfigError(format!(
-                            "protocol for service {svc_name} must be a valid protocol enum"
-                        )));
-                    }
-                },
-                None => {
-                    return Err(CompilationError::ConfigError(format!(
-                        "protocol for service {svc_name} not found in configuration"
-                    )));
-                }
-            };
-            if svc_name == vs_svc {
-                let mut vsp = prot.clone();
-                if ts_api == zpl::TS_API_V2 {
-                    // Since we do not get layer7 from the config api, we set it here.
-                    // TODO: Pass the layer7 info across the api boundry.
-                    vsp.set_layer7(ZPR_VALIDATION_2.to_string());
-                } else if ts_api == zpl::TS_API_FILE || ts_api == zpl::TS_API_OIDC {
-                    // Unreachable: `file` and `oidc` services take the early-out in
-                    // add_trusted_services and never get here. Guarded so the
-                    // unknown-API error below stays accurate if that ever changes.
-                    return Err(CompilationError::BuildError(format!(
-                        "trusted service {} with API {} has no visa-facing service",
-                        ts_name, ts_api
-                    )));
-                } else {
-                    return Err(CompilationError::ConfigError(format!(
-                        "trusted service {} has unknown API version {}",
-                        ts_name, ts_api
-                    )));
-                }
-                vs_svc_protocol = Some(vsp);
-            }
-        }
-        Ok(vs_svc_protocol)
-    }
-
     fn add_bootstrap_records(
         &mut self,
         config: &ConfigApi,
@@ -2237,20 +2033,15 @@ mod test {
         [visa_service]
         dock_node = "n0"
 
-        [trusted_services.bas]
-        api = "validation/2"
-        provider = [["device.zpr.adapter.cn", "fee"]]
-        returns_attributes = ["id -> user.id", "email -> user.email"]
-        identity_attributes = ["id"]
-
-        [services.bas-vs]
-        protocol = "zpr-validation2"
-        port = 3999
-
-        [services.bas-client]
-        protocol = "zpr-oauthrsa"
-        port = 3998
-
+        [trusted_services.idp]
+        api = "oidc"
+        issuer = "https://idp.example.com"
+        jwks_uri = "https://idp.example.com/jwks"
+        client_id = "zpr-client"
+        allowed_domains = ["*"]
+        expiration_seconds = 3600
+        returns_attributes = ["sub -> user.id", "email -> user.email"]
+        identity_attributes = ["sub"]
         "#;
 
         let ctx = CompilationCtx::default();
@@ -2258,7 +2049,7 @@ mod test {
             .expect("failed to parse config");
 
         let mut wctx = WeavingContext::default();
-        wctx.add_used_trusted_service("bas");
+        wctx.add_used_trusted_service("idp");
 
         let mut w = Weaver::new(wctx);
         let res = w.add_trusted_services(&config, &ctx);
@@ -2272,7 +2063,7 @@ mod test {
         assert_eq!(w.fabric.services.len(), 1);
 
         let fsvc = &w.fabric.services[0];
-        assert_eq!(fsvc.fabric_id, "bas");
+        assert_eq!(fsvc.fabric_id, "idp");
         let ts = fsvc.trusted_service.as_ref().unwrap();
         let return_attrs = &ts.returns_attrs;
         assert_eq!(return_attrs.len(), 2);
@@ -2284,11 +2075,11 @@ mod test {
                 .attr
                 .to_schema_string()
         };
-        assert_eq!(spec("id"), "user.id");
+        assert_eq!(spec("sub"), "user.id");
         assert_eq!(spec("email"), "user.email");
         let id_attrs = &ts.identity_attrs;
         assert_eq!(id_attrs.len(), 1);
-        assert!(id_attrs.contains(&String::from("id")));
+        assert!(id_attrs.contains(&String::from("sub")));
     }
 
     #[test]
@@ -2302,9 +2093,8 @@ mod test {
         zpr_address = "fd5a:5052:90de::1"
         provider = [["device.zpr.adapter.cn", "fee"]]
 
-        [trusted_services.bas]
-        api = "validation/2"
-        provider = [["device.zpr.adapter.cn", "fee"]]
+        [trusted_services.attrs]
+        api = "file"
         returns_attributes = ["id -> user.id"]
         "#;
 
@@ -2375,30 +2165,37 @@ mod test {
 
     #[test]
     fn test_trusted_service_transitive_use() {
-        // `outer` is referenced directly; its provider attribute is vouched for by `inner`,
-        // so `inner` must be discovered transitively and woven too.
+        // `outer` is referenced directly; the provider attribute of its JWKS proxy
+        // service is vouched for by `inner`, so `inner` must be discovered
+        // transitively and woven too.
         let cfg = r#"
         [nodes.n0]
         zpr_address = "fd5a:5052:90de::1"
         provider = [["device.zpr.adapter.cn", "fee"]]
 
         [trusted_services.inner]
-        api = "validation/2"
-        provider = [["device.zpr.adapter.cn", "fee"]]
+        api = "file"
         returns_attributes = ["ia -> user.innerattr"]
 
         [trusted_services.outer]
-        api = "validation/2"
+        api = "oidc"
+        issuer = "https://idp.example.com"
+        jwks_uri = "https://idp.example.com/jwks"
+        client_id = "zpr-client"
+        allowed_domains = ["*"]
+        expiration_seconds = 3600
+        service = "outer-jwks-proxy"
+        returns_attributes = ["sub -> user.sub", "oa -> user.outerattr"]
+        identity_attributes = ["sub"]
+
+        [protocols.tcp]
+        l4protocol = "TCP"
+        port = 3128
+
+        [services.outer-jwks-proxy]
+        protocol = "tcp"
+        port = 3128
         provider = [["user.innerattr", "someval"]]
-        returns_attributes = ["oa -> user.outerattr"]
-
-        [services.inner-vs]
-        protocol = "zpr-validation2"
-        port = 3999
-
-        [services.outer-vs]
-        protocol = "zpr-validation2"
-        port = 3998
         "#;
         let ctx = CompilationCtx::default();
         let config = ConfigApi::new_from_toml_content(cfg, &env::temp_dir(), &ctx)
@@ -2416,7 +2213,7 @@ mod test {
         assert!(w.wctx.used_trusted_services.contains("outer"));
         assert!(!w.wctx.used_trusted_services.contains("inner"));
 
-        // Weaving discovers `inner` transitively through `outer`'s provider attribute.
+        // Weaving discovers `inner` transitively through `outer`'s proxy provider attribute.
         w.add_trusted_services(&config, &ctx)
             .expect("add_trusted_services");
         let mut trusted: Vec<&str> = w

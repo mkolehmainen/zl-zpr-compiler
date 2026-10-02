@@ -14,10 +14,6 @@ returns_attributes = [
 expiration_seconds = 3600
 
 
-# [bootstrap]
-# "bas.zpr.org" = "rsa-pub-key.pem"
-
-
 [protocols.http]
 l4protocol = "TCP"
 port = 80
@@ -26,6 +22,3 @@ port = 80
 protocol = "http"
 port = "80, 100-150, 444"
 provider = [["device.zpr.adapter.cn", "db.org"]]
-
-
-
