@@ -368,7 +368,10 @@ icmp_codes = [0, 8]
 * `protocols.<NAME>` - The NAME here is used later in `services` blocks to reference
 the protocol.
 * `l4protocol` - Layer 4 protocol name. One of 'TCP', 'UDP', 'ICMPV6', or 'ICMP' (or 'ICMP4').
-* `port` - Port number. Currently only supports a single port number.
+* `port` - TCP/UDP port(s). Either a single port number (`port = 80`) or a string
+holding a comma-separated list of port numbers and inclusive `LOW-HIGH` ranges, eg
+`port = "443, 4343, 8000-8010"`. Each entry becomes its own scope in the compiled
+policy, and the visa service matches a flow on any one of them.
 * `icmp_type` - Required for the ICMP familty of protocols, possible values are: `request-response` or `oneshot`.
 * `icmp_codes` - Is a list of integers.  For `request-response` this is a tuple of
 (request-code, response-code).  For `oneshot` this is one or more allowed ICMP codes.
@@ -393,13 +396,23 @@ use many different ports, it is possible to override some aspects of a protocol 
 the service definition, for example:
 
 ```toml
-[protocol.webtls]
-l4protocl = "TCP"
+[protocols.webtls]
+l4protocol = "TCP"
 port = 443
 
-[service.WebService]
+[services.WebService]
 protocol = "webtls"
 port = 3030
+```
+
+The service's `port` accepts the same list and range forms as a protocol's, and
+replaces the protocol's ports rather than adding to them. So a service that
+listens on both 443 and 4343 is:
+
+```toml
+[services.WebService]
+protocol = "webtls"
+port = "443, 4343"
 ```
 
 To associate a service with an actor you need provider attributes. These can
