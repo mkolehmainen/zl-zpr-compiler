@@ -1,0 +1,21 @@
+# zipline#185: a `file` trusted service that vends `device.tags` multi-valued and
+# `device.color` single-valued. Used by tests/zpl-test.rs, which writes the ZPL
+# for each case to a temp directory and compiles it against this config.
+
+[nodes."node.zpr.org"]
+provider = [ ["device.zpr.adapter.cn", "node.zpr.org"]]
+zpr_address = "fd5a:5052:90de::1"
+
+[trusted_services.default]
+cert_path = "ca-cert.pem"
+
+[trusted_services.tags]
+api = "file"
+returns_attributes = ["device.tags -> device.tags{}", "device.color -> device.color"]
+
+[protocols.ssh]
+l4protocol = "TCP"
+port = 22
+
+[services.ssh]
+protocol = "ssh"
