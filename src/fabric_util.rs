@@ -128,12 +128,73 @@ mod test {
             "unexpected error: {err}"
         );
     }
+
+    /// Build a required `device.tags` attribute with the given values, multi-valued or not.
+    fn tags_attr(vals: &[&str], multi: bool) -> Attribute {
+        Attribute::tuple("device.tags")
+            .multi_if(multi)
+            .values(vals.iter().map(|v| v.to_string()).collect())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_squash_multi_valued_unions_values() {
+        // zipline#185: `device.tags:'server'` and `device.tags:'media'` on a
+        // multi-valued attribute are both satisfied by a device whose set holds
+        // both, so they combine into one "has all of" requirement.
+        let attrs = vec![
+            tags_attr(&["server"], true),
+            tags_attr(&["media", "server"], true),
+            tags_attr(&["laptop"], true),
+        ];
+        let map = squash_attributes(&attrs, &FPos::default()).expect("must not conflict");
+        assert_eq!(map.len(), 1);
+        let merged = &map["device.tags"];
+        assert!(merged.is_multi_valued());
+        assert!(!merged.optional);
+        assert_eq!(merged.zpl_values(), vec!["laptop", "media", "server"]);
+    }
+
+    #[test]
+    fn test_squash_single_valued_conflict_is_error() {
+        // A single-valued attribute cannot hold two values: a real contradiction.
+        let attrs = vec![tags_attr(&["server"], false), tags_attr(&["media"], false)];
+        let err = squash_attributes(&attrs, &FPos::default()).expect_err("must conflict");
+        assert!(
+            err.to_string().contains("conflicting values"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_squash_valued_wins_over_valueless() {
+        // Key presence (`device.tags:`) is implied by any valued requirement.
+        let valueless = Attribute::tuple("device.tags").multi().build().unwrap();
+        for attrs in [
+            vec![valueless.clone(), tags_attr(&["server"], true)],
+            vec![tags_attr(&["server"], true), valueless.clone()],
+        ] {
+            let map = squash_attributes(&attrs, &FPos::default()).unwrap();
+            assert_eq!(map["device.tags"].zpl_values(), vec!["server"]);
+        }
+    }
 }
 
 /// Given a list of attributes that apply, return just the set of unique
 /// attributes and the ones with values should take precedence over ones without.
 /// Keys are unique per tag (`<domain>.zpr.tag.<name>`), so tags never collide
 /// with each other here; a BTreeMap keeps iteration deterministic.
+///
+/// Two copies of a key with different values:
+/// - **multi-valued** (both copies): combine into one attribute whose values are
+///   the union. `tags:a` and `tags:b` each mean "the set contains it", so both
+///   hold exactly when the set contains `{a,b}` (zipline#185).
+/// - otherwise: a single-valued attribute cannot equal two values, so this is an
+///   [CompilationError::AttributeValueConflict].
+///
+/// Multi-valuedness comes from the trusted service mapping (`name{}`), so callers
+/// must run `Weaver::resolve_attributes` first or every copy looks single-valued.
 pub fn squash_attributes(
     attrs: &[Attribute],
     tok: &FPos,
@@ -152,8 +213,13 @@ pub fn squash_attributes(
                 // do nothing
             } else if map_attr.get_values().is_some()
                 && a.get_values().is_some()
-                && map_attr.zpl_value() != a.zpl_value()
+                && map_attr.zpl_values() != a.zpl_values()
             {
+                if map_attr.is_multi_valued() && a.is_multi_valued() {
+                    let merged = union_values(map_attr, a)?;
+                    attr_map.insert(a.zpl_key(), merged);
+                    continue;
+                }
                 return Err(CompilationError::AttributeValueConflict(
                     a.zpl_key(),
                     tok.line,
@@ -165,4 +231,19 @@ pub fn squash_attributes(
         }
     }
     Ok(attr_map)
+}
+
+/// Combine two copies of the same multi-valued attribute into one whose values are
+/// the sorted, deduplicated union of both. The result is optional only if both
+/// inputs are: a requirement from either side still applies.
+fn union_values(a: &Attribute, b: &Attribute) -> Result<Attribute, CompilationError> {
+    let mut values: Vec<String> = a.zpl_values();
+    values.extend(b.zpl_values());
+    values.sort();
+    values.dedup();
+    Ok(Attribute::tuple(a.zpl_key())
+        .multi()
+        .values(values)
+        .optional(a.optional && b.optional)
+        .build()?)
 }

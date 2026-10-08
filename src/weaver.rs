@@ -261,14 +261,7 @@ impl Weaver {
             }
 
             let fp = FPos::from(&ac.server[0].class_tok);
-            let attr_map = squash_attributes(&admin_access_attrs, &fp)?;
-            let resolved_attrs = self.resolve_attributes(
-                attr_map
-                    .into_values()
-                    .collect::<Vec<Attribute>>()
-                    .as_slice(),
-                config,
-            )?;
+            let resolved_attrs = self.resolve_and_squash(&admin_access_attrs, &fp, config)?;
 
             // Link constraints from the statement's OVER clause. Without this, a
             // policy like "allow admins to access VisaService over secure links"
@@ -385,14 +378,7 @@ impl Weaver {
             }
         };
 
-        let attr_map = squash_attributes(&attrs, &sclass.pos)?;
-        let resolved_attrs = self.resolve_attributes(
-            attr_map
-                .into_values()
-                .collect::<Vec<Attribute>>()
-                .as_slice(),
-            config,
-        )?;
+        let resolved_attrs = self.resolve_and_squash(&attrs, &sclass.pos, config)?;
 
         if resolved_attrs.is_empty() {
             return Err(CompilationError::ConfigError(format!(
@@ -506,6 +492,22 @@ impl Weaver {
     //
     // As a side effect, this updates our local set of in-use trusted services.
     //
+    /// Resolve `attrs` against the trusted services, then squash duplicates.
+    ///
+    /// The order matters: resolution is what marks an attribute multi-valued (from
+    /// the service's `name{}` mapping), and [squash_attributes] combines two values
+    /// of a multi-valued attribute but rejects them on a single-valued one
+    /// (zipline#185). `fp` is the position reported for a conflict.
+    fn resolve_and_squash(
+        &mut self,
+        attrs: &[Attribute],
+        fp: &FPos,
+        config: &ConfigApi,
+    ) -> Result<Vec<Attribute>, CompilationError> {
+        let resolved = self.resolve_attributes(attrs, config)?;
+        Ok(squash_attributes(&resolved, fp)?.into_values().collect())
+    }
+
     fn resolve_attributes(
         &mut self,
         attrs: &[Attribute],
@@ -1023,9 +1025,7 @@ impl Weaver {
 
             // Now we consolidate the attributes into a map, preferring attributes that have a value.
             let fp = FPos::from(server_service.class_tok);
-            let attr_map = squash_attributes(&attrs, &fp)?;
-            let required_attrs = self
-                .resolve_attributes(&attr_map.into_values().collect::<Vec<Attribute>>(), config)?;
+            let required_attrs = self.resolve_and_squash(&attrs, &fp, config)?;
 
             // Now grab the RHS attributes (attributes for the server)
             let svc_required_attrs = {
@@ -1034,11 +1034,7 @@ impl Weaver {
                     service_class_attrs
                         .extend(rhs_class.with.iter().filter(|a| !a.optional).cloned());
                 }
-                let attr_map = squash_attributes(&service_class_attrs, &fp)?;
-                self.resolve_attributes(
-                    &attr_map.into_values().collect::<Vec<Attribute>>(),
-                    config,
-                )?
+                self.resolve_and_squash(&service_class_attrs, &fp, config)?
             };
 
             // And the link constraints from the OVER clause, if the statement had one.

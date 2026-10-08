@@ -255,7 +255,12 @@ fn compile_policy_bytes(stem: &str, temp: &TempDir) -> Vec<u8> {
     let mut comp = cb.build();
     comp.compile()
         .unwrap_or_else(|e| panic!("failed to compile {stem}.zpl: {e}"));
-    let encoded = std::fs::read(&comp.output_file).expect("read binary policy");
+    read_policy_bytes(&comp.output_file)
+}
+
+/// Read a compiled V2 policy container file and return the inner policy bytes.
+fn read_policy_bytes(container_file: &std::path::Path) -> Vec<u8> {
+    let encoded = std::fs::read(container_file).expect("read binary policy");
     let container_rdr = capnp::serialize::read_message(
         &mut Cursor::new(encoded),
         capnp::message::ReaderOptions::new(),
@@ -1640,4 +1645,175 @@ fn test_node_zpr_address_still_emits_join_condition() {
         node_addr_condition_found,
         "node zpr_address must still emit a zpr.addr join condition"
     );
+}
+
+// ---- zipline#185: two required values of a multi-valued attribute ----
+
+/// Compile ZPL source text against `test-data/multi-valued-tags.zplc`. The source
+/// is written to a temp directory so each case needs no fixture file of its own.
+/// Returns the inner policy bytes, or the compilation error text.
+fn compile_mv_tags(name: &str, zpl: &str, temp: &TempDir) -> Result<Vec<u8>, String> {
+    let zpl_path = temp.path.join(format!("{name}.zpl"));
+    std::fs::write(&zpl_path, zpl).expect("write zpl source");
+    let mut comp = CompilationBuilder::new(zpl_path)
+        .config(&get_zpl_dir().join("multi-valued-tags.zplc"))
+        .output_format(OutputFormat::V2)
+        .output_directory(&temp.path)
+        .build();
+    comp.compile().map_err(|e| e.to_string())?;
+    Ok(read_policy_bytes(&comp.output_file))
+}
+
+/// The `device.tags` values (sorted) in a list of attribute expressions; empty if absent.
+fn device_tags(conds: &[AttrTuple]) -> Vec<String> {
+    let mut vals: Vec<String> = conds
+        .iter()
+        .filter(|(k, _, _)| k == "device.tags")
+        .flat_map(|(_, _, v)| v.clone())
+        .collect();
+    vals.sort();
+    vals
+}
+
+/// What the one tag-conditioned allow statement requires, as
+/// (client `device.tags`, host `device.tags`). The host side is the union of the
+/// join condition for the statement's service and any service condition on the
+/// statement, since either may carry it: an `on` clause compiles to a derived
+/// service *and* a service condition, the set form to the join condition alone.
+fn tag_requirements(pbytes: &[u8]) -> (Vec<String>, Vec<String>) {
+    let rdr = capnp::serialize::read_message(
+        &mut Cursor::new(pbytes),
+        capnp::message::ReaderOptions::new(),
+    )
+    .expect("decode policy");
+    let policy = rdr.get_root::<policy_capnp::policy::Reader>().unwrap();
+    let mut found = None;
+    for cp in policy.get_com_policies().unwrap().iter() {
+        let client = attr_tuples(cp.get_client_conds().unwrap());
+        if !cp.get_allow() || device_tags(&client).is_empty() {
+            continue;
+        }
+        assert!(found.is_none(), "expected one tag-conditioned allow policy");
+        let svc_id = cp.get_service_id().unwrap().to_str().unwrap().to_string();
+        let mut host = attr_tuples(cp.get_service_conds().unwrap());
+        for jp in policy.get_join_policies().unwrap().iter() {
+            let provides_svc = jp
+                .get_provides()
+                .unwrap()
+                .iter()
+                .any(|s| s.get_id().unwrap().to_str().unwrap() == svc_id);
+            if provides_svc {
+                host.extend(attr_tuples(jp.get_match().unwrap()));
+            }
+        }
+        let mut host_tags = device_tags(&host);
+        host_tags.dedup();
+        found = Some((device_tags(&client), host_tags));
+    }
+    found.expect("no tag-conditioned allow policy")
+}
+
+/// `ssh` hosts are servers; shared first line of every #185 case.
+const MV_SSH: &str = "define ssh as a service with device.tags:'server'.\n";
+
+/// Set form: phones reach ssh on hosts tagged both server and media.
+const MV_SERVER_SET: &str = "define ssh as a service with device.tags:{server,media}.\n\
+     allow device.tags:'phone' devices to access ssh.\n";
+
+/// Set form: devices tagged both laptop and work reach ssh.
+const MV_CLIENT_SET: &str = "define ssh as a service with device.tags:'server'.\n\
+     allow device.tags:{laptop,work} devices to access ssh.\n";
+
+#[test]
+fn test_multi_valued_requirements_combine() {
+    // zipline#185: each statement requires two values of the multi-valued
+    // `device.tags`. Each must compile, and to the same conditions as the
+    // equivalent set form.
+    let cases: [(&str, &str, &str); 5] = [
+        (
+            "on-attr",
+            "allow device.tags:'phone' devices to access ssh on device.tags:'media' devices.\n",
+            MV_SERVER_SET,
+        ),
+        (
+            "on-class",
+            "define media as a device with device.tags:'media'.\n\
+             allow device.tags:'phone' devices to access ssh on media.\n",
+            MV_SERVER_SET,
+        ),
+        (
+            "class-attr",
+            "define laptop as a device with device.tags:'laptop'.\n\
+             allow device.tags:'work' laptops to access ssh.\n",
+            MV_CLIENT_SET,
+        ),
+        (
+            "subclass",
+            "define laptop as a device with device.tags:'laptop'.\n\
+             define work-laptop as a laptop with device.tags:'work'.\n\
+             allow work-laptops to access ssh.\n",
+            MV_CLIENT_SET,
+        ),
+        (
+            "service-subclass",
+            "define media-ssh as a ssh with device.tags:'media'.\n\
+             allow device.tags:'phone' devices to access media-ssh.\n",
+            MV_SERVER_SET,
+        ),
+    ];
+    let temp = TempDir::new("mv-tags");
+
+    // Pin the set forms themselves, so the comparison below cannot pass vacuously.
+    let strs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let server_set = compile_mv_tags("server-set", MV_SERVER_SET, &temp).unwrap();
+    assert_eq!(
+        tag_requirements(&server_set),
+        (strs(&["phone"]), strs(&["media", "server"]))
+    );
+    let client_set = compile_mv_tags("client-set", MV_CLIENT_SET, &temp).unwrap();
+    assert_eq!(
+        tag_requirements(&client_set),
+        (strs(&["laptop", "work"]), strs(&["server"]))
+    );
+
+    for (name, body, set_form) in cases {
+        let got = compile_mv_tags(name, &format!("{MV_SSH}{body}"), &temp)
+            .unwrap_or_else(|e| panic!("case {name} must compile: {e}"));
+        let want = compile_mv_tags(&format!("{name}-set"), set_form, &temp)
+            .unwrap_or_else(|e| panic!("set form for {name} must compile: {e}"));
+        assert_eq!(
+            tag_requirements(&got),
+            tag_requirements(&want),
+            "case {name} must require the same tags as its set form"
+        );
+    }
+}
+
+#[test]
+fn test_single_valued_requirements_still_conflict() {
+    // zipline#185: `device.color` is single-valued, so two different required
+    // values are a real contradiction and must stay a compile error.
+    let cases = [
+        (
+            "sv-on-attr",
+            "define ssh as a service with device.color:'red'.\n\
+             allow device.tags:'phone' devices to access ssh on device.color:'blue' devices.\n",
+        ),
+        (
+            "sv-class-attr",
+            "define ssh as a service with device.tags:'server'.\n\
+             define red as a device with device.color:'red'.\n\
+             allow device.color:'blue' reds to access ssh.\n",
+        ),
+    ];
+    let temp = TempDir::new("sv-conflict");
+    for (name, zpl) in cases {
+        let err = compile_mv_tags(name, zpl, &temp)
+            .err()
+            .unwrap_or_else(|| panic!("case {name} must fail to compile"));
+        assert!(
+            err.contains("conflicting values for attribute device.color"),
+            "case {name}: unexpected error: {err}"
+        );
+    }
 }

@@ -309,6 +309,12 @@ the attribute is set as:
 * **Multi Value** - Add a '{}' to the end, eg `"user.role{}"`.
 * **Tag** - Prefixed with a hash mark (`#`), eg `"#device.secure`.
 
+The type changes how two requirements on the same attribute combine. When one statement
+requires two values of a **multi-valued** attribute -- through a class plus an attribute, a
+subclass, or a trailing `on` clause -- the compiler requires all of the values, the same as
+writing the set form `user.role:{admin,operator}`. When it requires two different values of a
+**single-valued** attribute, compilation fails with `conflicting values for attribute`.
+
 When specifying the `returns_attributes` use a map format with an arrow '->':
 
 
